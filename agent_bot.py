@@ -35,7 +35,7 @@ GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt"]
 
 # ─── Загрузка кода с GitHub ────────────────────────────────────────────────────
 
-def fetch_github_file(repo: str, filepath: str, token: str = "") -> str:
+def fetch_github_file(repo: str, filepath: str, token: str = "") -> str | None:
     url = f"https://raw.githubusercontent.com/{repo}/main/{filepath}"
     req = urllib.request.Request(url)
     if token:
@@ -48,26 +48,33 @@ def fetch_github_file(repo: str, filepath: str, token: str = "") -> str:
             return content
     except urllib.error.HTTPError as e:
         logger.warning("GitHub fetch failed for %s: HTTP %s", filepath, e.code)
-        return f"# Не удалось загрузить {filepath}: HTTP {e.code}"
+        return None
     except Exception as e:
         logger.warning("GitHub fetch error for %s: %s", filepath, e)
-        return f"# Не удалось загрузить {filepath}: {e}"
+        return None
 
 
-def load_code_from_github() -> str:
+def load_code_from_github() -> tuple[str, list[str]]:
     parts = []
+    failed = []
     for fname in GITHUB_FILES:
         content = fetch_github_file(GITHUB_REPO, fname, GITHUB_TOKEN)
+        if content is None:
+            failed.append(fname)
+            continue
         ext = fname.rsplit(".", 1)[-1]
         lang = "python" if ext == "py" else "text"
         parts.append(f"### {fname}\n```{lang}\n{content}\n```")
-    return "\n\n".join(parts)
+    return "\n\n".join(parts), failed
 
 
 # Загружаем при старте
-SIRNIKE_CODE = load_code_from_github()
+SIRNIKE_CODE, CODE_LOAD_ERRORS = load_code_from_github()
 RELOAD_LOCK = asyncio.Lock()
-logger.info("Total code loaded: %d chars", len(SIRNIKE_CODE))
+if CODE_LOAD_ERRORS:
+    logger.warning("Failed to load from GitHub: %s", CODE_LOAD_ERRORS)
+else:
+    logger.info("Total code loaded: %d chars", len(SIRNIKE_CODE))
 
 # ─── Системные промпты ─────────────────────────────────────────────────────────
 
@@ -229,15 +236,21 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    global SIRNIKE_CODE
+    global SIRNIKE_CODE, CODE_LOAD_ERRORS
     msg = await update.message.reply_text("Загружаю код с GitHub...")
     async with RELOAD_LOCK:
-        SIRNIKE_CODE = await asyncio.get_event_loop().run_in_executor(
+        SIRNIKE_CODE, CODE_LOAD_ERRORS = await asyncio.get_event_loop().run_in_executor(
             None, load_code_from_github
         )
-    await msg.edit_text(
-        f"Готово ✅\nЗагружено {len(SIRNIKE_CODE):,} символов из {GITHUB_REPO}"
-    )
+    if CODE_LOAD_ERRORS:
+        await msg.edit_text(
+            f"⚠️ Не удалось загрузить: {', '.join(CODE_LOAD_ERRORS)}\n"
+            f"Агенты заблокированы. Проверь репо и повтори /reload."
+        )
+    else:
+        await msg.edit_text(
+            f"Готово ✅\nЗагружено {len(SIRNIKE_CODE):,} символов из {GITHUB_REPO}"
+        )
 
 
 async def run_agent_command(
@@ -247,6 +260,12 @@ async def run_agent_command(
 ):
     if not is_allowed(update.effective_user.id):
         await update.message.reply_text("Нет доступа.")
+        return
+
+    if CODE_LOAD_ERRORS:
+        await update.message.reply_text(
+            f"Код не загружен ({', '.join(CODE_LOAD_ERRORS)}).\nСделай /reload и попробуй снова."
+        )
         return
 
     user_input = " ".join(context.args).strip() if context.args else ""
