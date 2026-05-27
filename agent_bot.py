@@ -181,14 +181,24 @@ def split_text(text: str, max_len: int = 4000) -> list[str]:
     return chunks
 
 
+async def send_chunk(update: Update, text: str, status_msg=None):
+    try:
+        if status_msg:
+            await status_msg.edit_text(text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown")
+    except Exception:
+        if status_msg:
+            await status_msg.edit_text(text)
+        else:
+            await update.message.reply_text(text)
+
+
 async def send_long(update: Update, text: str, status_msg=None):
     chunks = split_text(text)
     for i, chunk in enumerate(chunks):
-        suffix = f"\n\n_({i+1}/{len(chunks)})_" if len(chunks) > 1 else ""
-        if i == 0 and status_msg:
-            await status_msg.edit_text(chunk + suffix, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(chunk + suffix, parse_mode="Markdown")
+        suffix = f"\n\n({i+1}/{len(chunks)})" if len(chunks) > 1 else ""
+        await send_chunk(update, chunk + suffix, status_msg if i == 0 else None)
 
 
 # ─── Telegram хендлеры ────────────────────────────────────────────────────────
