@@ -9,7 +9,6 @@ import logging
 import os
 import urllib.request
 import urllib.error
-import json
 
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
@@ -30,7 +29,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
 
-MODEL = "claude-sonnet-4-20250514"
+MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt"]
 
@@ -67,6 +66,7 @@ def load_code_from_github() -> str:
 
 # Загружаем при старте
 SIRNIKE_CODE = load_code_from_github()
+RELOAD_LOCK = asyncio.Lock()
 logger.info("Total code loaded: %d chars", len(SIRNIKE_CODE))
 
 # ─── Системные промпты ─────────────────────────────────────────────────────────
@@ -146,12 +146,12 @@ def get_system_prompt(agent_type: str) -> str:
 
 # ─── Anthropic клиент ──────────────────────────────────────────────────────────
 
-anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 
 async def call_agent(agent_type: str, user_message: str) -> str:
     try:
-        response = anthropic_client.messages.create(
+        response = await anthropic_client.messages.create(
             model=MODEL,
             max_tokens=4096,
             system=get_system_prompt(agent_type),
@@ -168,13 +168,21 @@ async def call_agent(agent_type: str, user_message: str) -> str:
 
 # ─── Хелпер: отправить длинный текст ──────────────────────────────────────────
 
-async def send_long(update: Update, text: str, status_msg=None):
-    max_len = 4000
+def split_text(text: str, max_len: int = 4000) -> list[str]:
     chunks = []
-    while text:
-        chunks.append(text[:max_len])
-        text = text[max_len:]
+    while len(text) > max_len:
+        split_at = text.rfind("\n", 0, max_len)
+        if split_at == -1:
+            split_at = max_len
+        chunks.append(text[:split_at])
+        text = text[split_at:].lstrip("\n")
+    if text:
+        chunks.append(text)
+    return chunks
 
+
+async def send_long(update: Update, text: str, status_msg=None):
+    chunks = split_text(text)
     for i, chunk in enumerate(chunks):
         suffix = f"\n\n_({i+1}/{len(chunks)})_" if len(chunks) > 1 else ""
         if i == 0 and status_msg:
@@ -213,7 +221,10 @@ async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     global SIRNIKE_CODE
     msg = await update.message.reply_text("Загружаю код с GitHub...")
-    SIRNIKE_CODE = load_code_from_github()
+    async with RELOAD_LOCK:
+        SIRNIKE_CODE = await asyncio.get_event_loop().run_in_executor(
+            None, load_code_from_github
+        )
     await msg.edit_text(
         f"Готово ✅\nЗагружено {len(SIRNIKE_CODE):,} символов из {GITHUB_REPO}"
     )
@@ -246,14 +257,10 @@ async def run_agent_command(
         parse_mode="Markdown",
     )
 
-    result = await asyncio.get_event_loop().run_in_executor(
-        None, lambda: asyncio.run(call_agent(agent_type, task))
-    )
-
+    result = await call_agent(agent_type, task)
     await send_long(update, result, status_msg)
 
 
-# Обёртки для каждой команды
 async def cmd_qa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_agent_command(update, context, "qa")
 
@@ -290,10 +297,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
 def main():
-    # Фикс для asyncio внутри run_in_executor
-    import nest_asyncio
-    nest_asyncio.apply()
-
     app = Application.builder().token(AGENT_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_help))
     app.add_handler(CommandHandler("help", cmd_help))
