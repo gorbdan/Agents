@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 AGENT_BOT_TOKEN = os.environ["AGENT_BOT_TOKEN"]
 ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-GITHUB_REPO = os.environ.get("GITHUB_REPO", "gorbdan/sirnike")
+GITHUB_REPO = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
