@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import io
 import logging
 import os
 import urllib.request
@@ -294,7 +295,12 @@ async def run_agent_command(
     )
 
     result = await call_agent(agent_type, task)
-    await send_long(update, result, status_msg)
+
+    filenames = {"qa": "qa_report.md", "analyze": "analyze_report.md", "fix": "fix_patches.md"}
+    doc = io.BytesIO(result.encode("utf-8"))
+    doc.name = filenames[agent_type]
+    await status_msg.delete()
+    await update.message.reply_document(document=doc, filename=doc.name)
 
 
 async def cmd_qa(update: Update, context: ContextTypes.DEFAULT_TYPE):
