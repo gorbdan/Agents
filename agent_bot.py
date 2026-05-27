@@ -38,6 +38,7 @@ ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
 
 MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
+AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))  # 0 = выключено
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt"]
 
@@ -336,10 +337,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ─── Автотест ─────────────────────────────────────────────────────────────────
+
+async def auto_qa_loop(app):
+    if not AUTO_QA_INTERVAL_H or not ADMIN_IDS:
+        return
+    interval = AUTO_QA_INTERVAL_H * 3600
+    logger.info("Auto-QA started: every %dh, reporting to %s", AUTO_QA_INTERVAL_H, ADMIN_IDS[0])
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            logger.info("Auto-QA: running scheduled test...")
+            result = await call_agent("qa", "Проведи полное тестирование всех основных сценариев бота.")
+            doc = io.BytesIO(result.encode("utf-8"))
+            doc.name = "auto_qa_report.md"
+            await app.bot.send_document(
+                chat_id=ADMIN_IDS[0],
+                document=doc,
+                filename=doc.name,
+                caption=f"🤖 Авто-QA отчёт (каждые {AUTO_QA_INTERVAL_H}ч)",
+            )
+            logger.info("Auto-QA: report sent")
+        except Exception:
+            logger.exception("Auto-QA failed")
+
+
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
+async def post_init(app):
+    if AUTO_QA_INTERVAL_H and ADMIN_IDS:
+        asyncio.create_task(auto_qa_loop(app))
+
+
 def main():
-    app = Application.builder().token(AGENT_BOT_TOKEN).build()
+    app = Application.builder().token(AGENT_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_help))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("qa", cmd_qa))
@@ -349,9 +380,10 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info(
-        "Agent bot started. Repo: %s, Code: %d chars",
+        "Agent bot started. Repo: %s, Code: %d chars, Auto-QA: %s",
         GITHUB_REPO,
         len(SIRNIKE_CODE),
+        f"every {AUTO_QA_INTERVAL_H}h" if AUTO_QA_INTERVAL_H else "off",
     )
     app.run_polling()
 
