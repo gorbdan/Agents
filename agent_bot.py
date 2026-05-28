@@ -295,31 +295,24 @@ async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         results.append(f"✅ GitHub: все файлы загружены ({len(GITHUB_FILES)} шт.)")
 
-    # 2. Проверка Claude API (минимальный запрос)
+    # 2. Проверка Claude API — один дешёвый запрос без кода
     try:
         resp = await anthropic_client.messages.create(
             model=MODEL,
-            max_tokens=20,
-            messages=[{"role": "user", "content": "Ответь одним словом: работаю"}],
+            max_tokens=10,
+            messages=[{"role": "user", "content": "1+1="}],
         )
-        answer = resp.content[0].text.strip()[:50]
-        results.append(f"✅ Claude API: отвечает ({answer!r})")
+        results.append(f"✅ Claude API: отвечает")
     except Exception as e:
         results.append(f"❌ Claude API: ошибка ({e})")
 
-    # 3. Проверка каждого агента (минимальный промпт)
+    # 3. Проверка агентов — только конфиг, без отправки запросов
     for agent_type, label in [("qa", "QA"), ("analyze", "Analyst"), ("fix", "Fix")]:
         try:
-            resp = await anthropic_client.messages.create(
-                model=MODEL,
-                max_tokens=30,
-                system=get_system_prompt(agent_type),
-                messages=[{"role": "user", "content": "Ответь одним словом: готов"}],
-            )
-            answer = resp.content[0].text.strip()[:50]
-            results.append(f"✅ Агент {label}: работает ({answer!r})")
+            prompt = get_system_prompt(agent_type)
+            results.append(f"✅ Агент {label}: промпт собран ({len(prompt):,} символов)")
         except Exception as e:
-            results.append(f"❌ Агент {label}: ошибка ({e})")
+            results.append(f"❌ Агент {label}: ошибка сборки промпта ({e})")
 
     # 4. Проверка LAST_ANALYSIS
     if LAST_ANALYSIS:
