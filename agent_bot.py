@@ -11,7 +11,7 @@ import os
 import urllib.request
 import urllib.error
 
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 import anthropic
 
@@ -298,10 +298,17 @@ async def run_agent_command(
     result = await call_agent(agent_type, task)
 
     filenames = {"qa": "qa_report.md", "analyze": "analyze_report.md", "fix": "fix_patches.md"}
-    doc = io.BytesIO(result.encode("utf-8"))
-    doc.name = filenames[agent_type]
-    await status_msg.delete()
-    await update.message.reply_document(document=doc, filename=doc.name)
+    fname = filenames[agent_type]
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+    try:
+        doc = InputFile(io.BytesIO(result.encode("utf-8")), filename=fname)
+        await update.message.reply_document(document=doc)
+    except Exception:
+        logger.exception("Failed to send document, falling back to text")
+        await send_long(update, result)
 
 
 async def cmd_qa(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -349,12 +356,10 @@ async def auto_qa_loop(app):
         try:
             logger.info("Auto-QA: running scheduled test...")
             result = await call_agent("qa", "Проведи полное тестирование всех основных сценариев бота.")
-            doc = io.BytesIO(result.encode("utf-8"))
-            doc.name = "auto_qa_report.md"
+            doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_qa_report.md")
             await app.bot.send_document(
                 chat_id=ADMIN_IDS[0],
                 document=doc,
-                filename=doc.name,
                 caption=f"🤖 Авто-QA отчёт (каждые {AUTO_QA_INTERVAL_H}ч)",
             )
             logger.info("Auto-QA: report sent")
@@ -364,9 +369,13 @@ async def auto_qa_loop(app):
 
 # ─── Запуск ───────────────────────────────────────────────────────────────────
 
+_auto_qa_task = None
+
 async def post_init(app):
+    global _auto_qa_task
     if AUTO_QA_INTERVAL_H and ADMIN_IDS:
-        asyncio.create_task(auto_qa_loop(app))
+        _auto_qa_task = asyncio.create_task(auto_qa_loop(app))
+        logger.info("Auto-QA task created")
 
 
 def main():
