@@ -79,6 +79,7 @@ def load_code_from_github() -> tuple[str, list[str]]:
 
 # Загружаем при старте
 SIRNIKE_CODE, CODE_LOAD_ERRORS = load_code_from_github()
+LAST_ANALYSIS: str = ""  # последний отчёт /analyze — передаётся в следующий запрос
 RELOAD_LOCK = asyncio.Lock()
 if CODE_LOAD_ERRORS:
     logger.warning("Failed to load from GitHub: %s", CODE_LOAD_ERRORS)
@@ -130,6 +131,9 @@ ANALYZE_SUFFIX = """
 
 Для каждой проблемы: файл + строка → описание → сценарий воспроизведения → серьёзность → предложение по фиксу.
 Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно.
+
+{previous_analysis_section}
+
 Отвечай чётко, на русском.
 """
 
@@ -156,7 +160,17 @@ FIX_SUFFIX = """
 
 def get_system_prompt(agent_type: str) -> str:
     base = make_base_context()
-    suffixes = {"qa": QA_SUFFIX, "analyze": ANALYZE_SUFFIX, "fix": FIX_SUFFIX}
+    if agent_type == "analyze" and LAST_ANALYSIS:
+        prev = (
+            "⚠️ ПРЕДЫДУЩИЙ АНАЛИЗ УЖЕ БЫЛ ПРОВЕДЁН. Все баги из него считаются ИСПРАВЛЕННЫМИ.\n"
+            "Ищи ТОЛЬКО новые проблемы, которых не было в предыдущем отчёте.\n"
+            "Если новых проблем нет — так и напиши.\n\n"
+            f"Предыдущий отчёт:\n{LAST_ANALYSIS[:6000]}"
+        )
+        suffix = ANALYZE_SUFFIX.replace("{previous_analysis_section}", prev)
+    else:
+        suffix = ANALYZE_SUFFIX.replace("{previous_analysis_section}", "")
+    suffixes = {"qa": QA_SUFFIX, "analyze": suffix, "fix": FIX_SUFFIX}
     return base + suffixes[agent_type]
 
 
@@ -245,12 +259,13 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    global SIRNIKE_CODE, CODE_LOAD_ERRORS
+    global SIRNIKE_CODE, CODE_LOAD_ERRORS, LAST_ANALYSIS
     msg = await update.message.reply_text("Загружаю код с GitHub...")
     async with RELOAD_LOCK:
         SIRNIKE_CODE, CODE_LOAD_ERRORS = await asyncio.get_event_loop().run_in_executor(
             None, load_code_from_github
         )
+    LAST_ANALYSIS = ""  # сбрасываем историю — код обновился
     if CODE_LOAD_ERRORS:
         await msg.edit_text(
             f"⚠️ Не удалось загрузить: {', '.join(CODE_LOAD_ERRORS)}\n"
@@ -296,6 +311,10 @@ async def run_agent_command(
     )
 
     result = await call_agent(agent_type, task)
+
+    if agent_type == "analyze":
+        global LAST_ANALYSIS
+        LAST_ANALYSIS = result
 
     filenames = {"qa": "qa_report.md", "analyze": "analyze_report.md", "fix": "fix_patches.md"}
     fname = filenames[agent_type]
