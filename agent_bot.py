@@ -40,7 +40,7 @@ ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS
 MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
 AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))  # 0 = выключено
 
-GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt"]
+GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
 
 # ─── Загрузка кода с GitHub ────────────────────────────────────────────────────
 
@@ -136,8 +136,13 @@ QA_SUFFIX = """
 ANALYZE_SUFFIX = """
 Ты Analyst-агент. Ищешь баги и проблемы в коде.
 
+ВАЖНЫЕ ПРАВИЛА:
+- Бот использует asyncio (однопоточный event loop). Операции между двумя await-точками атомарны — race condition между ними физически невозможен. НЕ репортить как баг паттерн "проверка → add/set" если между ними нет await.
+- Если в коде есть файл AGENT_NOTES.md — он содержит список уже исправленных багов и подтверждённых ложных срабатываний. Не репортить то что там отмечено как fixed или false_positive.
+- Репортить только реальные, воспроизводимые проблемы.
+
 Смотри на:
-1. Race conditions и конкурентность
+1. Race conditions (только через await-границы)
 2. Утечки памяти и ресурсов
 3. Непойманные исключения и потери данных
 4. Безопасность (валидация, инъекции)
