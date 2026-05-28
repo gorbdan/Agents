@@ -37,7 +37,9 @@ logger.info(
 ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
 
-MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")
+MODEL_ANALYZE = os.environ.get("MODEL_ANALYZE", "claude-haiku-4-5")
+MODEL_QA = os.environ.get("MODEL_QA", "claude-haiku-4-5")
+MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")  # для selftest и прочего
 AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))  # 0 = выключено
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
@@ -202,10 +204,18 @@ def get_system_prompt(agent_type: str) -> str:
 anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
 
 
+def _model_for(agent_type: str) -> str:
+    if agent_type == "analyze":
+        return MODEL_ANALYZE
+    if agent_type == "qa":
+        return MODEL_QA
+    return MODEL
+
+
 async def call_agent(agent_type: str, user_message: str) -> str:
     try:
         response = await anthropic_client.messages.create(
-            model=MODEL,
+            model=_model_for(agent_type),
             max_tokens=8000,
             system=get_system_prompt(agent_type),
             messages=[{"role": "user", "content": user_message}],
