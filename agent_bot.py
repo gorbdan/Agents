@@ -272,12 +272,63 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/fix — патчи для топ-проблем\n"
         "/fix <проблема> — фикс конкретной проблемы\n\n"
         "/reload — перезагрузить код с GitHub\n"
-        "/reset_analysis — сбросить историю анализа\n\n"
+        "/reset_analysis — сбросить историю анализа\n"
+        "/selftest — проверить что все агенты работают\n\n"
         "Примеры:\n"
         "/qa онбординг нового пользователя\n"
         "/analyze race conditions в очереди\n"
         "/fix потеря изюминок при краше воркера"
     )
+
+
+async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+
+    msg = await update.message.reply_text("🔍 Запускаю самодиагностику...")
+    results = []
+
+    # 1. Проверка загрузки кода с GitHub
+    _, failed = load_code_from_github()
+    if failed:
+        results.append(f"❌ GitHub: не загружены {', '.join(failed)}")
+    else:
+        results.append(f"✅ GitHub: все файлы загружены ({len(GITHUB_FILES)} шт.)")
+
+    # 2. Проверка Claude API (минимальный запрос)
+    try:
+        resp = await anthropic_client.messages.create(
+            model=MODEL,
+            max_tokens=20,
+            messages=[{"role": "user", "content": "Ответь одним словом: работаю"}],
+        )
+        answer = resp.content[0].text.strip()[:50]
+        results.append(f"✅ Claude API: отвечает ({answer!r})")
+    except Exception as e:
+        results.append(f"❌ Claude API: ошибка ({e})")
+
+    # 3. Проверка каждого агента (минимальный промпт)
+    for agent_type, label in [("qa", "QA"), ("analyze", "Analyst"), ("fix", "Fix")]:
+        try:
+            resp = await anthropic_client.messages.create(
+                model=MODEL,
+                max_tokens=30,
+                system=get_system_prompt(agent_type),
+                messages=[{"role": "user", "content": "Ответь одним словом: готов"}],
+            )
+            answer = resp.content[0].text.strip()[:50]
+            results.append(f"✅ Агент {label}: работает ({answer!r})")
+        except Exception as e:
+            results.append(f"❌ Агент {label}: ошибка ({e})")
+
+    # 4. Проверка LAST_ANALYSIS
+    if LAST_ANALYSIS:
+        results.append(f"✅ Память анализа: есть ({len(LAST_ANALYSIS):,} символов)")
+    else:
+        results.append("⚠️ Память анализа: пуста (первый /analyze создаст)")
+
+    report = "Результаты самодиагностики:\n\n" + "\n".join(results)
+    await msg.edit_text(report)
 
 
 async def cmd_reset_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -441,6 +492,7 @@ def main():
     app.add_handler(CommandHandler("fix", cmd_fix))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("reset_analysis", cmd_reset_analysis))
+    app.add_handler(CommandHandler("selftest", cmd_selftest))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info(
