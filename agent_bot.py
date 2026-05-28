@@ -1,7 +1,7 @@
 """
-Агент-бот для Сырника.
-Загружает код с GitHub, анализирует через Claude.
-Команды: /qa, /analyze, /fix, /reload, /help
+Агент-бот для Сырника — CrewAI версия.
+6 специализированных агентов на Gemini (бесплатно).
+Команды: /audit, /tech, /ux, /security, /marketing, /database, /performance
 """
 
 import asyncio
@@ -12,39 +12,28 @@ import urllib.request
 import urllib.error
 
 from telegram import Update, InputFile
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-import anthropic
+from telegram.ext import Application, CommandHandler, ContextTypes, filters
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s: %(message)s",
-)
+from crewai import Agent, Task, Crew, Process, LLM
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-# ─── Конфиг ───────────────────────────────────────────────────────────────────
+# ── Конфиг ───────────────────────────────────────────────────────────────────
 
 AGENT_BOT_TOKEN = os.environ["AGENT_BOT_TOKEN"]
-ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]
-GITHUB_REPO = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
-GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "")
-
-logger.info(
-    "Config: SIRNIKE_REPO=%r GITHUB_REPO=%r → using %r",
-    os.environ.get("SIRNIKE_REPO"),
-    os.environ.get("GITHUB_REPO"),
-    GITHUB_REPO,
-)
-ADMIN_IDS_RAW = os.environ.get("ADMIN_IDS", "")
-ADMIN_IDS = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
-
-MODEL_ANALYZE = os.environ.get("MODEL_ANALYZE", "claude-haiku-4-5")
-MODEL_QA = os.environ.get("MODEL_QA", "claude-haiku-4-5")
-MODEL = os.environ.get("MODEL", "claude-sonnet-4-6")  # для selftest и прочего
-AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))  # 0 = выключено
+GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
+GITHUB_REPO     = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
+GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
+ADMIN_IDS_RAW   = os.environ.get("ADMIN_IDS", "")
+ADMIN_IDS       = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
+AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
 
-# ─── Загрузка кода с GitHub ────────────────────────────────────────────────────
+logger.info("Repo: %r", GITHUB_REPO)
+
+# ── GitHub ────────────────────────────────────────────────────────────────────
 
 def fetch_github_file(repo: str, filepath: str, token: str = "") -> str | None:
     url = f"https://raw.githubusercontent.com/{repo}/main/{filepath}"
@@ -55,455 +44,362 @@ def fetch_github_file(repo: str, filepath: str, token: str = "") -> str | None:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             content = resp.read().decode("utf-8")
-            logger.info("Loaded %s from GitHub (%d chars)", filepath, len(content))
+            logger.info("Loaded %s (%d chars)", filepath, len(content))
             return content
     except urllib.error.HTTPError as e:
-        logger.warning("GitHub fetch failed for %s: HTTP %s", filepath, e.code)
+        logger.warning("GitHub %s: HTTP %s", filepath, e.code)
         return None
     except Exception as e:
-        logger.warning("GitHub fetch error for %s: %s", filepath, e)
+        logger.warning("GitHub %s: %s", filepath, e)
         return None
 
 
 def load_code_from_github() -> tuple[str, list[str]]:
-    parts = []
-    failed = []
+    parts, failed = [], []
     for fname in GITHUB_FILES:
         content = fetch_github_file(GITHUB_REPO, fname, GITHUB_TOKEN)
         if content is None:
             failed.append(fname)
             continue
-        ext = fname.rsplit(".", 1)[-1]
-        lang = "python" if ext == "py" else "text"
+        lang = "python" if fname.endswith(".py") else "text"
         parts.append(f"### {fname}\n```{lang}\n{content}\n```")
     return "\n\n".join(parts), failed
 
 
-# Загружаем при старте
 SIRNIKE_CODE, CODE_LOAD_ERRORS = load_code_from_github()
-LAST_ANALYSIS_FILE = "last_analysis.md"
-
-def _load_last_analysis() -> str:
-    try:
-        with open(LAST_ANALYSIS_FILE, "r", encoding="utf-8") as f:
-            return f.read()
-    except FileNotFoundError:
-        return ""
-
-def _save_last_analysis(text: str) -> None:
-    try:
-        with open(LAST_ANALYSIS_FILE, "w", encoding="utf-8") as f:
-            f.write(text)
-    except Exception:
-        logger.warning("Failed to save last analysis to disk")
-
-LAST_ANALYSIS: str = _load_last_analysis()
 RELOAD_LOCK = asyncio.Lock()
 if CODE_LOAD_ERRORS:
-    logger.warning("Failed to load from GitHub: %s", CODE_LOAD_ERRORS)
+    logger.warning("Failed to load: %s", CODE_LOAD_ERRORS)
 else:
-    logger.info("Total code loaded: %d chars", len(SIRNIKE_CODE))
+    logger.info("Total: %d chars", len(SIRNIKE_CODE))
 
-# ─── Системные промпты ─────────────────────────────────────────────────────────
+# ── LLM ───────────────────────────────────────────────────────────────────────
 
-def make_base_context() -> str:
-    return f"""Ты работаешь с кодом Telegram-бота "Сырник" — AI-генератор изображений и видео.
-Стек: Python, python-telegram-bot, SQLite, aiohttp.
-Провайдеры генерации: Zveno (Gemini), MashaGPT, YesAPI, Seedance (видео).
-Деплой: BotHost + Docker. Внутренняя валюта: "изюминки".
-GitHub: https://github.com/{GITHUB_REPO}
+def make_llm() -> LLM:
+    return LLM(model="gemini/gemini-1.5-flash", api_key=GEMINI_API_KEY)
+
+# ── Агенты ────────────────────────────────────────────────────────────────────
+
+BOT_CONTEXT = """
+Telegram-бот "Сырник" — AI-генератор изображений и видео.
+Стек: Python 3.12, python-telegram-bot, SQLite, aiohttp.
+Провайдеры: Zveno (Gemini), MashaGPT, YesAPI, Seedance (видео).
+Деплой: BotHost + Docker. Валюта: изюминки.
+asyncio — однопоточный event loop. Операции между await-точками атомарны.
+"""
+
+AGENTS_CONFIG = {
+    "tech": {
+        "role": "Технический аналитик",
+        "goal": "Найти технические баги: необработанные исключения, потери данных, async-проблемы, утечки памяти",
+        "backstory": "Опытный Python/asyncio разработчик. Знает что в однопоточном asyncio нет race condition без await между операциями.",
+        "focus": "исключения, потери изюминок при крашах, проблемы очереди генерации, утечки памяти",
+    },
+    "ux": {
+        "role": "UX-аналитик",
+        "goal": "Найти проблемы с пользовательским опытом: непонятные сообщения, плохой онбординг, запутанные сценарии",
+        "backstory": "Специалист по UX Telegram-ботов. Смотрит глазами пользователя.",
+        "focus": "тексты сообщений, онбординг новых пользователей, кнопки, сценарии, ошибки которые видит юзер",
+    },
+    "security": {
+        "role": "Security-аналитик",
+        "goal": "Найти уязвимости: проблемы с платежами, валидацией, SQL-инъекции, утечки данных",
+        "backstory": "Специалист по безопасности с фокусом на платёжные системы.",
+        "focus": "валидация платёжных payload, SQL-запросы, защита от накрутки, безопасность API",
+    },
+    "marketing": {
+        "role": "Маркетинг-аналитик",
+        "goal": "Оценить реферальную систему, монетизацию, удержание пользователей",
+        "backstory": "Growth-менеджер с опытом в Telegram-ботах и freemium-монетизации.",
+        "focus": "реферальная система, пакеты изюминок, бесплатные генерации, конверсия в покупку, retention",
+    },
+    "database": {
+        "role": "Database-инженер",
+        "goal": "Найти проблемы с данными: неатомарные операции, потери при крашах, дубли записей",
+        "backstory": "Специалист по SQLite и целостности данных.",
+        "focus": "транзакции, INSERT OR IGNORE, потеря данных при сбоях, схема БД, дублирование",
+    },
+    "performance": {
+        "role": "Performance-инженер",
+        "goal": "Найти узкие места: очередь генерации, память, медленные запросы, блокирующий I/O",
+        "backstory": "Специалист по оптимизации Python-сервисов под нагрузкой.",
+        "focus": "очередь генерации, кэш изображений, медленные DB-запросы, блокирующий I/O в async-контексте",
+    },
+}
+
+TASK_TEMPLATE = """{bot_context}
 
 Код проекта:
-{SIRNIKE_CODE}
-"""
+{code}
+
+Проанализируй с точки зрения: {focus}
+
+Для каждой проблемы укажи:
+- Файл и строка
+- Описание проблемы
+- Сценарий воспроизведения
+- Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно
+- Предложение по фиксу
+
+Отвечай на русском, чётко по пунктам."""
+
+FOLLOWUP_TEMPLATE = """На основе предыдущих находок, проанализируй код со своей точки зрения: {focus}
+
+Не повторяй уже найденное. Добавляй только то что в твоей зоне ответственности.
+Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно. На русском."""
 
 
-QA_SUFFIX = """
-Ты QA-агент. Тестируешь пользовательские сценарии.
+def run_single_agent(agent_key: str, code: str) -> str:
+    cfg = AGENTS_CONFIG[agent_key]
+    llm = make_llm()
 
-Без уточнения — проходись по всем основным флоу:
-1. Новый пользователь (/start, онбординг, первая генерация)
-2. Генерация с промптом и без фото
-3. Генерация с фото-референсом
-4. Покупка изюминок (/buy → оплата → начисление)
-5. Реферальная система
-6. Seedance видео
-7. Аватары (загрузка, генерация, удаление)
-
-Для каждого сценария: шаги → ожидаемое поведение → потенциальные баги.
-Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно.
-Отвечай чётко, по пунктам, на русском.
-"""
-
-ANALYZE_SUFFIX = """
-Ты Analyst-агент. Ищешь баги и проблемы в коде.
-
-ВАЖНЫЕ ПРАВИЛА:
-- Бот использует asyncio (однопоточный event loop). Операции между двумя await-точками атомарны — race condition между ними физически невозможен. НЕ репортить как баг паттерн "проверка → add/set" если между ними нет await.
-- Если в коде есть файл AGENT_NOTES.md — он содержит список уже исправленных багов и подтверждённых ложных срабатываний. Не репортить то что там отмечено как fixed или false_positive.
-- Репортить только реальные, воспроизводимые проблемы.
-
-Смотри на:
-1. Race conditions (только через await-границы)
-2. Утечки памяти и ресурсов
-3. Непойманные исключения и потери данных
-4. Безопасность (валидация, инъекции)
-5. Edge cases в бизнес-логике (изюминки, рефералы, оплата)
-6. Персистентность (__img__ кэш, аватары)
-7. Узкие места производительности
-
-Для каждой проблемы: файл + строка → описание → сценарий воспроизведения → серьёзность → предложение по фиксу.
-Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно.
-
-{previous_analysis_section}
-
-Отвечай чётко, на русском.
-"""
-
-FIX_SUFFIX = """
-Ты Fix-агент. Пишешь конкретные патчи.
-
-Для каждого фикса:
-1. Кратко объясни проблему (1-2 предложения)
-2. Покажи что было и что стало
-
-Формат:
-```python
-# было:
-старый код
-
-# стало:
-новый код
-```
-
-Патчи минимальные — меняй только нужное.
-Отвечай на русском.
-"""
+    agent = Agent(
+        role=cfg["role"],
+        goal=cfg["goal"],
+        backstory=cfg["backstory"],
+        llm=llm,
+        verbose=False,
+        allow_delegation=False,
+    )
+    task = Task(
+        description=TASK_TEMPLATE.format(
+            bot_context=BOT_CONTEXT, code=code, focus=cfg["focus"]
+        ),
+        expected_output=f"Список проблем: {cfg['role']}",
+        agent=agent,
+    )
+    crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
+    return str(crew.kickoff())
 
 
-def get_system_prompt(agent_type: str) -> str:
-    base = make_base_context()
-    if agent_type == "analyze" and LAST_ANALYSIS:
-        prev = (
-            "## Предыдущий анализ\n"
-            "Ниже баги из прошлого отчёта. Проверь каждый по текущему коду:\n"
-            "- Если баг **исправлен** — напиши '✅ Исправлен: [название]' и не включай в основной список\n"
-            "- Если баг **ещё есть** — включи в отчёт как обычно\n"
-            "- Новые баги которых раньше не было — добавляй в конец\n\n"
-            f"Предыдущий отчёт:\n{LAST_ANALYSIS[:6000]}"
+def run_full_audit(code: str) -> str:
+    llm = make_llm()
+
+    agents = {
+        key: Agent(
+            role=cfg["role"],
+            goal=cfg["goal"],
+            backstory=cfg["backstory"],
+            llm=llm,
+            verbose=False,
+            allow_delegation=False,
         )
-        suffix = ANALYZE_SUFFIX.replace("{previous_analysis_section}", prev)
-    else:
-        suffix = ANALYZE_SUFFIX.replace("{previous_analysis_section}", "")
-    suffixes = {"qa": QA_SUFFIX, "analyze": suffix, "fix": FIX_SUFFIX}
-    return base + suffixes[agent_type]
+        for key, cfg in AGENTS_CONFIG.items()
+    }
 
-
-# ─── Anthropic клиент ──────────────────────────────────────────────────────────
-
-anthropic_client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY)
-
-
-def _model_for(agent_type: str) -> str:
-    if agent_type == "analyze":
-        return MODEL_ANALYZE
-    if agent_type == "qa":
-        return MODEL_QA
-    return MODEL
-
-
-async def call_agent(agent_type: str, user_message: str) -> str:
-    try:
-        response = await anthropic_client.messages.create(
-            model=_model_for(agent_type),
-            max_tokens=8000,
-            system=get_system_prompt(agent_type),
-            messages=[{"role": "user", "content": user_message}],
-        )
-        return response.content[0].text
-    except anthropic.APIStatusError as e:
-        logger.exception("Anthropic API error")
-        return f"Ошибка API: {e.status_code} — {e.message}"
-    except Exception as e:
-        logger.exception("Agent call failed")
-        return f"Ошибка агента: {e}"
-
-
-# ─── Хелпер: отправить длинный текст ──────────────────────────────────────────
-
-def split_text(text: str, max_len: int = 4000) -> list[str]:
-    chunks = []
-    while len(text) > max_len:
-        split_at = text.rfind("\n", 0, max_len)
-        if split_at == -1:
-            split_at = max_len
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip("\n")
-    if text:
-        chunks.append(text)
-    return chunks
-
-
-async def send_chunk(update: Update, text: str, status_msg=None):
-    try:
-        if status_msg:
-            await status_msg.edit_text(text, parse_mode="Markdown")
-        else:
-            await update.message.reply_text(text, parse_mode="Markdown")
-    except Exception:
-        if status_msg:
-            await status_msg.edit_text(text)
-        else:
-            await update.message.reply_text(text)
-
-
-async def send_long(update: Update, text: str, status_msg=None):
-    chunks = split_text(text)
-    for i, chunk in enumerate(chunks):
-        suffix = f"\n\n({i+1}/{len(chunks)})" if len(chunks) > 1 else ""
-        await send_chunk(update, chunk + suffix, status_msg if i == 0 else None)
-
-
-# ─── Telegram хендлеры ────────────────────────────────────────────────────────
-
-def is_allowed(user_id: int) -> bool:
-    if not ADMIN_IDS:
-        return True
-    return user_id in ADMIN_IDS
-
-
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "Агенты Сырника 🧀\n\n"
-        "/qa — тест всех сценариев\n"
-        "/qa <тема> — тест конкретного флоу\n\n"
-        "/analyze — найти баги в коде\n"
-        "/analyze <тема> — анализ конкретной части\n\n"
-        "/fix — патчи для топ-проблем\n"
-        "/fix <проблема> — фикс конкретной проблемы\n\n"
-        "/reload — перезагрузить код с GitHub\n"
-        "/reset_analysis — сбросить историю анализа\n"
-        "/selftest — проверить что все агенты работают\n\n"
-        "Примеры:\n"
-        "/qa онбординг нового пользователя\n"
-        "/analyze race conditions в очереди\n"
-        "/fix потеря изюминок при краше воркера"
+    # Первый агент получает полный код
+    first_task = Task(
+        description=TASK_TEMPLATE.format(
+            bot_context=BOT_CONTEXT,
+            code=code,
+            focus=AGENTS_CONFIG["tech"]["focus"],
+        ),
+        expected_output="Список технических багов",
+        agent=agents["tech"],
     )
 
-
-async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-
-    msg = await update.message.reply_text("🔍 Запускаю самодиагностику...")
-    results = []
-
-    # 1. Проверка загрузки кода с GitHub
-    _, failed = load_code_from_github()
-    if failed:
-        results.append(f"❌ GitHub: не загружены {', '.join(failed)}")
-    else:
-        results.append(f"✅ GitHub: все файлы загружены ({len(GITHUB_FILES)} шт.)")
-
-    # 2. Проверка Claude API — один дешёвый запрос без кода
-    try:
-        resp = await anthropic_client.messages.create(
-            model=MODEL,
-            max_tokens=10,
-            messages=[{"role": "user", "content": "1+1="}],
+    # Остальные агенты видят предыдущие находки через context
+    prev_tasks = [first_task]
+    followup_tasks = []
+    for key in ["ux", "security", "marketing", "database", "performance"]:
+        task = Task(
+            description=FOLLOWUP_TEMPLATE.format(focus=AGENTS_CONFIG[key]["focus"]),
+            expected_output=f"Находки: {AGENTS_CONFIG[key]['role']}",
+            agent=agents[key],
+            context=prev_tasks.copy(),
         )
-        results.append(f"✅ Claude API: отвечает")
-    except Exception as e:
-        results.append(f"❌ Claude API: ошибка ({e})")
+        followup_tasks.append(task)
+        prev_tasks.append(task)
 
-    # 3. Проверка агентов — только конфиг, без отправки запросов
-    for agent_type, label in [("qa", "QA"), ("analyze", "Analyst"), ("fix", "Fix")]:
-        try:
-            prompt = get_system_prompt(agent_type)
-            results.append(f"✅ Агент {label}: промпт собран ({len(prompt):,} символов)")
-        except Exception as e:
-            results.append(f"❌ Агент {label}: ошибка сборки промпта ({e})")
+    # Финальный репортёр собирает всё
+    reporter = Agent(
+        role="Главный редактор отчёта",
+        goal="Собрать все находки в единый структурированный отчёт без дублей",
+        backstory="Технический редактор, специалист по audit-отчётам.",
+        llm=llm,
+        verbose=False,
+        allow_delegation=False,
+    )
+    final_task = Task(
+        description="""Собери все находки в единый отчёт. Убери дубли. Расставь по приоритету.
 
-    # 4. Проверка LAST_ANALYSIS
-    if LAST_ANALYSIS:
-        results.append(f"✅ Память анализа: есть ({len(LAST_ANALYSIS):,} символов)")
-    else:
-        results.append("⚠️ Память анализа: пуста (первый /analyze создаст)")
+Структура:
+# Полный аудит Сырника
 
-    report = "Результаты самодиагностики:\n\n" + "\n".join(results)
-    await msg.edit_text(report)
+## 🔴 Критические баги
+## 🟡 Важные проблемы
+## 🟢 Незначительные замечания
+## ✅ Что работает хорошо
+
+На русском.""",
+        expected_output="Полный структурированный отчёт",
+        agent=reporter,
+        context=prev_tasks,
+    )
+
+    all_tasks = [first_task] + followup_tasks + [final_task]
+    all_agents = list(agents.values()) + [reporter]
+
+    crew = Crew(
+        agents=all_agents,
+        tasks=all_tasks,
+        process=Process.sequential,
+        verbose=False,
+    )
+    return str(crew.kickoff())
 
 
-async def cmd_reset_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ── Telegram хендлеры ─────────────────────────────────────────────────────────
+
+def is_allowed(user_id: int) -> bool:
+    return not ADMIN_IDS or user_id in ADMIN_IDS
+
+
+async def run_crew_command(
+    update: Update,
+    runner_fn,
+    filename: str,
+    label: str,
+):
     if not is_allowed(update.effective_user.id):
         return
-    global LAST_ANALYSIS
-    LAST_ANALYSIS = ""
-    _save_last_analysis("")
-    await update.message.reply_text("История анализа сброшена ✅\nСледующий /analyze будет как первый.")
+    if CODE_LOAD_ERRORS:
+        await update.message.reply_text(
+            f"Код не загружен ({', '.join(CODE_LOAD_ERRORS)}).\nСделай /reload."
+        )
+        return
+
+    msg = await update.message.reply_text(f"{label} работает... ⏳\n(пара минут)")
+    try:
+        result = await asyncio.get_event_loop().run_in_executor(None, runner_fn)
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+        doc = InputFile(io.BytesIO(result.encode("utf-8")), filename=filename)
+        await update.message.reply_document(document=doc)
+    except Exception as e:
+        logger.exception("Crew failed")
+        await msg.edit_text(f"❌ Ошибка: {e}")
+
+
+async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_full_audit(SIRNIKE_CODE), "full_audit.md", "🔍 Полный аудит (6 агентов)")
+
+async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_single_agent("tech", SIRNIKE_CODE), "tech_report.md", "⚙️ Tech-агент")
+
+async def cmd_ux(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_single_agent("ux", SIRNIKE_CODE), "ux_report.md", "👤 UX-агент")
+
+async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_single_agent("security", SIRNIKE_CODE), "security_report.md", "🔒 Security-агент")
+
+async def cmd_marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_single_agent("marketing", SIRNIKE_CODE), "marketing_report.md", "📊 Marketing-агент")
+
+async def cmd_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_single_agent("database", SIRNIKE_CODE), "database_report.md", "🗄️ Database-агент")
+
+async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_crew_command(update, lambda: run_single_agent("performance", SIRNIKE_CODE), "performance_report.md", "⚡ Performance-агент")
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    global SIRNIKE_CODE, CODE_LOAD_ERRORS, LAST_ANALYSIS
+    global SIRNIKE_CODE, CODE_LOAD_ERRORS
     msg = await update.message.reply_text("Загружаю код с GitHub...")
     async with RELOAD_LOCK:
         SIRNIKE_CODE, CODE_LOAD_ERRORS = await asyncio.get_event_loop().run_in_executor(
             None, load_code_from_github
         )
-    LAST_ANALYSIS = ""
-    _save_last_analysis("")  # сбрасываем историю — код обновился
     if CODE_LOAD_ERRORS:
-        await msg.edit_text(
-            f"⚠️ Не удалось загрузить: {', '.join(CODE_LOAD_ERRORS)}\n"
-            f"Агенты заблокированы. Проверь репо и повтори /reload."
-        )
+        await msg.edit_text(f"⚠️ Не удалось загрузить: {', '.join(CODE_LOAD_ERRORS)}\nПроверь репо и повтори /reload.")
     else:
-        await msg.edit_text(
-            f"Готово ✅\nЗагружено {len(SIRNIKE_CODE):,} символов из {GITHUB_REPO}"
-        )
+        await msg.edit_text(f"✅ Загружено {len(SIRNIKE_CODE):,} символов из {GITHUB_REPO}")
 
 
-async def run_agent_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    agent_type: str,
-):
+async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
-        await update.message.reply_text("Нет доступа.")
         return
+    msg = await update.message.reply_text("🔍 Самодиагностика...")
+    results = []
 
-    if CODE_LOAD_ERRORS:
-        await update.message.reply_text(
-            f"Код не загружен ({', '.join(CODE_LOAD_ERRORS)}).\nСделай /reload и попробуй снова."
-        )
-        return
+    _, failed = load_code_from_github()
+    results.append(f"{'✅' if not failed else '❌'} GitHub: {'все файлы загружены' if not failed else ', '.join(failed)}")
+    results.append(f"✅ Gemini API: ключ {'настроен' if GEMINI_API_KEY else '❌ не задан'}")
+    results.append(f"✅ Агентов: {len(AGENTS_CONFIG)} ({', '.join(AGENTS_CONFIG.keys())})")
+    results.append(f"✅ Код: {len(SIRNIKE_CODE):,} символов")
 
-    user_input = " ".join(context.args).strip() if context.args else ""
+    await msg.edit_text("Самодиагностика:\n\n" + "\n".join(results))
 
-    default_tasks = {
-        "qa": "Проведи полное тестирование всех основных сценариев бота.",
-        "analyze": "Найди все критические и важные баги в коде.",
-        "fix": "Предложи патчи для топ-5 самых важных проблем.",
-    }
-    agent_labels = {"qa": "QA", "analyze": "Analyst", "fix": "Fix"}
 
-    task = user_input or default_tasks[agent_type]
-    label = agent_labels[agent_type]
-
-    preview = task[:80] + ("..." if len(task) > 80 else "")
-    status_msg = await update.message.reply_text(
-        f"{label}-агент работает... ⏳\n_{preview}_",
-        parse_mode="Markdown",
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Агенты Сырника 🧀\n\n"
+        "/audit — полный аудит (все 6 агентов)\n\n"
+        "/tech — технические баги\n"
+        "/ux — пользовательский опыт\n"
+        "/security — безопасность и платежи\n"
+        "/marketing — монетизация и рефералы\n"
+        "/database — целостность данных\n"
+        "/performance — производительность\n\n"
+        "/reload — обновить код с GitHub\n"
+        "/selftest — проверить что всё работает"
     )
 
-    result = await call_agent(agent_type, task)
 
-    if agent_type == "analyze":
-        global LAST_ANALYSIS
-        LAST_ANALYSIS = result
-        _save_last_analysis(result)
+# ── Авто-аудит ────────────────────────────────────────────────────────────────
 
-    filenames = {"qa": "qa_report.md", "analyze": "analyze_report.md", "fix": "fix_patches.md"}
-    fname = filenames[agent_type]
-    try:
-        await status_msg.delete()
-    except Exception:
-        pass
-    try:
-        doc = InputFile(io.BytesIO(result.encode("utf-8")), filename=fname)
-        await update.message.reply_document(document=doc)
-    except Exception:
-        logger.exception("Failed to send document, falling back to text")
-        await send_long(update, result)
+_auto_audit_task = None
 
 
-async def cmd_qa(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, context, "qa")
-
-async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, context, "analyze")
-
-async def cmd_fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, context, "fix")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_allowed(update.effective_user.id):
-        return
-    text = (update.message.text or "").strip().lower()
-    if not text:
-        return
-
-    if any(w in text for w in ["баг", "ошибк", "краш", "проблем", "сломал", "не работ"]):
-        await run_agent_command(update, context, "analyze")
-    elif any(w in text for w in ["почини", "исправ", "патч", "фикс", "fix"]):
-        await run_agent_command(update, context, "fix")
-    elif any(w in text for w in ["протест", "проверь", "сценар", "тест"]):
-        await run_agent_command(update, context, "qa")
-    else:
-        await update.message.reply_text(
-            "Используй команды:\n"
-            "/qa — тест\n"
-            "/analyze — анализ\n"
-            "/fix — патчи\n"
-            "/help — справка"
-        )
-
-
-# ─── Автотест ─────────────────────────────────────────────────────────────────
-
-async def auto_qa_loop(app):
+async def auto_audit_loop(app):
     if not AUTO_QA_INTERVAL_H or not ADMIN_IDS:
         return
     interval = AUTO_QA_INTERVAL_H * 3600
-    logger.info("Auto-QA started: every %dh, reporting to %s", AUTO_QA_INTERVAL_H, ADMIN_IDS[0])
+    logger.info("Auto-audit: every %dh → %d", AUTO_QA_INTERVAL_H, ADMIN_IDS[0])
     while True:
         await asyncio.sleep(interval)
         try:
-            logger.info("Auto-QA: running scheduled test...")
-            result = await call_agent("qa", "Проведи полное тестирование всех основных сценариев бота.")
-            doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_qa_report.md")
+            result = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: run_full_audit(SIRNIKE_CODE)
+            )
+            doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_audit.md")
             await app.bot.send_document(
                 chat_id=ADMIN_IDS[0],
                 document=doc,
-                caption=f"🤖 Авто-QA отчёт (каждые {AUTO_QA_INTERVAL_H}ч)",
+                caption=f"🤖 Авто-аудит (каждые {AUTO_QA_INTERVAL_H}ч)",
             )
-            logger.info("Auto-QA: report sent")
         except Exception:
-            logger.exception("Auto-QA failed")
+            logger.exception("Auto-audit failed")
 
-
-# ─── Запуск ───────────────────────────────────────────────────────────────────
-
-_auto_qa_task = None
 
 async def post_init(app):
-    global _auto_qa_task
+    global _auto_audit_task
     if AUTO_QA_INTERVAL_H and ADMIN_IDS:
-        _auto_qa_task = asyncio.create_task(auto_qa_loop(app))
-        logger.info("Auto-QA task created")
+        _auto_audit_task = asyncio.create_task(auto_audit_loop(app))
+        logger.info("Auto-audit task created")
 
+
+# ── Запуск ────────────────────────────────────────────────────────────────────
 
 def main():
     app = Application.builder().token(AGENT_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_help))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("qa", cmd_qa))
-    app.add_handler(CommandHandler("analyze", cmd_analyze))
-    app.add_handler(CommandHandler("fix", cmd_fix))
+    app.add_handler(CommandHandler("audit", cmd_audit))
+    app.add_handler(CommandHandler("tech", cmd_tech))
+    app.add_handler(CommandHandler("ux", cmd_ux))
+    app.add_handler(CommandHandler("security", cmd_security))
+    app.add_handler(CommandHandler("marketing", cmd_marketing))
+    app.add_handler(CommandHandler("database", cmd_database))
+    app.add_handler(CommandHandler("performance", cmd_performance))
     app.add_handler(CommandHandler("reload", cmd_reload))
-    app.add_handler(CommandHandler("reset_analysis", cmd_reset_analysis))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info(
-        "Agent bot started. Repo: %s, Code: %d chars, Auto-QA: %s",
-        GITHUB_REPO,
-        len(SIRNIKE_CODE),
-        f"every {AUTO_QA_INTERVAL_H}h" if AUTO_QA_INTERVAL_H else "off",
-    )
+    logger.info("Agent bot started (CrewAI + Gemini). Repo: %s, Code: %d chars", GITHUB_REPO, len(SIRNIKE_CODE))
     app.run_polling()
 
 
