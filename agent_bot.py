@@ -169,7 +169,7 @@ async def call_agent(agent_type: str, user_message: str) -> str:
     try:
         response = await anthropic_client.messages.create(
             model=MODEL,
-            max_tokens=4096,
+            max_tokens=8000,
             system=get_system_prompt(agent_type),
             messages=[{"role": "user", "content": user_message}],
         )
