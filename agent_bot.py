@@ -79,7 +79,23 @@ def load_code_from_github() -> tuple[str, list[str]]:
 
 # Загружаем при старте
 SIRNIKE_CODE, CODE_LOAD_ERRORS = load_code_from_github()
-LAST_ANALYSIS: str = ""  # последний отчёт /analyze — передаётся в следующий запрос
+LAST_ANALYSIS_FILE = "last_analysis.md"
+
+def _load_last_analysis() -> str:
+    try:
+        with open(LAST_ANALYSIS_FILE, "r", encoding="utf-8") as f:
+            return f.read()
+    except FileNotFoundError:
+        return ""
+
+def _save_last_analysis(text: str) -> None:
+    try:
+        with open(LAST_ANALYSIS_FILE, "w", encoding="utf-8") as f:
+            f.write(text)
+    except Exception:
+        logger.warning("Failed to save last analysis to disk")
+
+LAST_ANALYSIS: str = _load_last_analysis()
 RELOAD_LOCK = asyncio.Lock()
 if CODE_LOAD_ERRORS:
     logger.warning("Failed to load from GitHub: %s", CODE_LOAD_ERRORS)
@@ -248,12 +264,22 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/analyze <тема> — анализ конкретной части\n\n"
         "/fix — патчи для топ-проблем\n"
         "/fix <проблема> — фикс конкретной проблемы\n\n"
-        "/reload — перезагрузить код с GitHub\n\n"
+        "/reload — перезагрузить код с GitHub\n"
+        "/reset_analysis — сбросить историю анализа\n\n"
         "Примеры:\n"
         "/qa онбординг нового пользователя\n"
         "/analyze race conditions в очереди\n"
         "/fix потеря изюминок при краше воркера"
     )
+
+
+async def cmd_reset_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update.effective_user.id):
+        return
+    global LAST_ANALYSIS
+    LAST_ANALYSIS = ""
+    _save_last_analysis("")
+    await update.message.reply_text("История анализа сброшена ✅\nСледующий /analyze будет как первый.")
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -265,7 +291,8 @@ async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         SIRNIKE_CODE, CODE_LOAD_ERRORS = await asyncio.get_event_loop().run_in_executor(
             None, load_code_from_github
         )
-    LAST_ANALYSIS = ""  # сбрасываем историю — код обновился
+    LAST_ANALYSIS = ""
+    _save_last_analysis("")  # сбрасываем историю — код обновился
     if CODE_LOAD_ERRORS:
         await msg.edit_text(
             f"⚠️ Не удалось загрузить: {', '.join(CODE_LOAD_ERRORS)}\n"
@@ -315,6 +342,7 @@ async def run_agent_command(
     if agent_type == "analyze":
         global LAST_ANALYSIS
         LAST_ANALYSIS = result
+        _save_last_analysis(result)
 
     filenames = {"qa": "qa_report.md", "analyze": "analyze_report.md", "fix": "fix_patches.md"}
     fname = filenames[agent_type]
@@ -405,6 +433,7 @@ def main():
     app.add_handler(CommandHandler("analyze", cmd_analyze))
     app.add_handler(CommandHandler("fix", cmd_fix))
     app.add_handler(CommandHandler("reload", cmd_reload))
+    app.add_handler(CommandHandler("reset_analysis", cmd_reset_analysis))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     logger.info(
