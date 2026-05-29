@@ -400,7 +400,7 @@ def main():
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
 
-    logger.info("Agent bot started (CrewAI + Gemini). Repo: %s, Code: %d chars", GITHUB_REPO, len(SIRNIKE_CODE))
+    logger.info("Agent bot started (CrewAI + Groq). Repo: %s, Code: %d chars", GITHUB_REPO, len(SIRNIKE_CODE))
     app.run_polling()
 
 
