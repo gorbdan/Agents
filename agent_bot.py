@@ -76,7 +76,8 @@ else:
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 def make_llm() -> LLM:
-    return LLM(model="gemini-2.0-flash", api_key=GEMINI_API_KEY)
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
+    return LLM(model=model, api_key=GEMINI_API_KEY)
 
 # ── Агенты ────────────────────────────────────────────────────────────────────
 
