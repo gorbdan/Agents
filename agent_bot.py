@@ -80,8 +80,14 @@ else:
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 def make_llm() -> LLM:
-    model = os.environ.get("LLM_MODEL", "groq/llama-3.3-70b-versatile")
-    return LLM(model=model, api_key=GROQ_API_KEY)
+    # Groq совместим с OpenAI API — используем нативный OpenAI-провайдер CrewAI
+    # без LiteLLM, без конфликтов aiohttp
+    model = os.environ.get("LLM_MODEL", "openai/llama-3.3-70b-versatile")
+    return LLM(
+        model=model,
+        api_key=GROQ_API_KEY,
+        base_url="https://api.groq.com/openai/v1",
+    )
 
 # ── Агенты ────────────────────────────────────────────────────────────────────
 
