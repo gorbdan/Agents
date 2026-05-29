@@ -1,4 +1,5 @@
 python-telegram-bot==22.7
 crewai[litellm]>=0.80.0
 groq>=0.9.0
+aiohttp>=3.9.0,<4.0.0
 python-dotenv==1.2.1
