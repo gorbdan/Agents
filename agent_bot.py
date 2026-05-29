@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 AGENT_BOT_TOKEN = os.environ["AGENT_BOT_TOKEN"]
 GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
+# LiteLLM (движок CrewAI) читает ключ через GOOGLE_API_KEY
+os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
 GITHUB_REPO     = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW   = os.environ.get("ADMIN_IDS", "")
@@ -76,7 +78,7 @@ else:
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 def make_llm() -> LLM:
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-lite")
+    model = os.environ.get("GEMINI_MODEL", "gemini/gemini-2.0-flash")
     return LLM(model=model, api_key=GEMINI_API_KEY)
 
 # ── Агенты ────────────────────────────────────────────────────────────────────
