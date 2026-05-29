@@ -35,6 +35,9 @@ AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
 
+# Groq free tier: 12k токенов на запрос. SirNike.py большой — режем каждый файл.
+MAX_FILE_CHARS = 24000  # ~6k токенов, оставляем место для промпта
+
 logger.info("Repo: %r", GITHUB_REPO)
 
 # ── GitHub ────────────────────────────────────────────────────────────────────
@@ -58,24 +61,49 @@ def fetch_github_file(repo: str, filepath: str, token: str = "") -> str | None:
         return None
 
 
-def load_code_from_github() -> tuple[str, list[str]]:
-    parts, failed = [], []
+def load_code_from_github() -> tuple[dict[str, str], list[str]]:
+    """Возвращает dict {filename: content} и список ошибок."""
+    files, failed = {}, []
     for fname in GITHUB_FILES:
         content = fetch_github_file(GITHUB_REPO, fname, GITHUB_TOKEN)
         if content is None:
             failed.append(fname)
             continue
-        lang = "python" if fname.endswith(".py") else "text"
-        parts.append(f"### {fname}\n```{lang}\n{content}\n```")
-    return "\n\n".join(parts), failed
+        if len(content) > MAX_FILE_CHARS:
+            content = content[:MAX_FILE_CHARS] + f"\n\n... [файл обрезан, показаны первые {MAX_FILE_CHARS} символов из {len(content)}]"
+        files[fname] = content
+    return files, failed
 
 
-SIRNIKE_CODE, CODE_LOAD_ERRORS = load_code_from_github()
+def build_code_block(files: dict[str, str], filenames: list[str]) -> str:
+    """Собирает блок кода из нужных файлов."""
+    parts = []
+    for fname in filenames:
+        if fname in files:
+            lang = "python" if fname.endswith(".py") else "text"
+            parts.append(f"### {fname}\n```{lang}\n{files[fname]}\n```")
+    return "\n\n".join(parts)
+
+
+CODE_FILES: dict[str, str] = {}
+CODE_LOAD_ERRORS: list[str] = []
 RELOAD_LOCK = asyncio.Lock()
+
+CODE_FILES, CODE_LOAD_ERRORS = load_code_from_github()
 if CODE_LOAD_ERRORS:
     logger.warning("Failed to load: %s", CODE_LOAD_ERRORS)
 else:
-    logger.info("Total: %d chars", len(SIRNIKE_CODE))
+    logger.info("Loaded %d files, total %d chars", len(CODE_FILES), sum(len(v) for v in CODE_FILES.values()))
+
+# Какие файлы видит каждый агент
+AGENT_FILES = {
+    "tech":        ["SirNike.py", "requirements.txt", "AGENT_NOTES.md"],
+    "ux":          ["SirNike.py", "AGENT_NOTES.md"],
+    "security":    ["SirNike.py", "config.py", "AGENT_NOTES.md"],
+    "marketing":   ["SirNike.py", "AGENT_NOTES.md"],
+    "database":    ["db.py", "SirNike.py", "AGENT_NOTES.md"],
+    "performance": ["SirNike.py", "AGENT_NOTES.md"],
+}
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
@@ -160,8 +188,9 @@ FOLLOWUP_TEMPLATE = """На основе предыдущих находок, п
 Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно. На русском."""
 
 
-def run_single_agent(agent_key: str, code: str) -> str:
+def run_single_agent(agent_key: str) -> str:
     cfg = AGENTS_CONFIG[agent_key]
+    code = build_code_block(CODE_FILES, AGENT_FILES[agent_key])
     llm = make_llm()
 
     agent = Agent(
@@ -183,11 +212,14 @@ def run_single_agent(agent_key: str, code: str) -> str:
     return str(crew.kickoff())
 
 
-def run_full_audit(code: str) -> str:
+def run_full_audit() -> str:
     llm = make_llm()
+    results = []
 
-    agents = {
-        key: Agent(
+    # Каждый агент работает независимо со своим набором файлов
+    for key, cfg in AGENTS_CONFIG.items():
+        code = build_code_block(CODE_FILES, AGENT_FILES[key])
+        agent = Agent(
             role=cfg["role"],
             goal=cfg["goal"],
             backstory=cfg["backstory"],
@@ -195,69 +227,19 @@ def run_full_audit(code: str) -> str:
             verbose=False,
             allow_delegation=False,
         )
-        for key, cfg in AGENTS_CONFIG.items()
-    }
-
-    # Первый агент получает полный код
-    first_task = Task(
-        description=TASK_TEMPLATE.format(
-            bot_context=BOT_CONTEXT,
-            code=code,
-            focus=AGENTS_CONFIG["tech"]["focus"],
-        ),
-        expected_output="Список технических багов",
-        agent=agents["tech"],
-    )
-
-    # Остальные агенты видят предыдущие находки через context
-    prev_tasks = [first_task]
-    followup_tasks = []
-    for key in ["ux", "security", "marketing", "database", "performance"]:
         task = Task(
-            description=FOLLOWUP_TEMPLATE.format(focus=AGENTS_CONFIG[key]["focus"]),
-            expected_output=f"Находки: {AGENTS_CONFIG[key]['role']}",
-            agent=agents[key],
-            context=prev_tasks.copy(),
+            description=TASK_TEMPLATE.format(
+                bot_context=BOT_CONTEXT, code=code, focus=cfg["focus"]
+            ),
+            expected_output=f"Список проблем: {cfg['role']}",
+            agent=agent,
         )
-        followup_tasks.append(task)
-        prev_tasks.append(task)
+        crew = Crew(agents=[agent], tasks=[task], process=Process.sequential, verbose=False)
+        result = str(crew.kickoff())
+        results.append(f"## {cfg['role']}\n\n{result}")
+        logger.info("Agent %s done", key)
 
-    # Финальный репортёр собирает всё
-    reporter = Agent(
-        role="Главный редактор отчёта",
-        goal="Собрать все находки в единый структурированный отчёт без дублей",
-        backstory="Технический редактор, специалист по audit-отчётам.",
-        llm=llm,
-        verbose=False,
-        allow_delegation=False,
-    )
-    final_task = Task(
-        description="""Собери все находки в единый отчёт. Убери дубли. Расставь по приоритету.
-
-Структура:
-# Полный аудит Сырника
-
-## 🔴 Критические баги
-## 🟡 Важные проблемы
-## 🟢 Незначительные замечания
-## ✅ Что работает хорошо
-
-На русском.""",
-        expected_output="Полный структурированный отчёт",
-        agent=reporter,
-        context=prev_tasks,
-    )
-
-    all_tasks = [first_task] + followup_tasks + [final_task]
-    all_agents = list(agents.values()) + [reporter]
-
-    crew = Crew(
-        agents=all_agents,
-        tasks=all_tasks,
-        process=Process.sequential,
-        verbose=False,
-    )
-    return str(crew.kickoff())
+    return "# Полный аудит Сырника\n\n" + "\n\n---\n\n".join(results)
 
 
 # ── Telegram хендлеры ─────────────────────────────────────────────────────────
@@ -274,10 +256,8 @@ async def run_crew_command(
 ):
     if not is_allowed(update.effective_user.id):
         return
-    if CODE_LOAD_ERRORS:
-        await update.message.reply_text(
-            f"Код не загружен ({', '.join(CODE_LOAD_ERRORS)}).\nСделай /reload."
-        )
+    if not CODE_FILES:
+        await update.message.reply_text("Код не загружен. Сделай /reload.")
         return
 
     msg = await update.message.reply_text(f"{label} работает... ⏳\n(пара минут)")
@@ -295,40 +275,41 @@ async def run_crew_command(
 
 
 async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_full_audit(SIRNIKE_CODE), "full_audit.md", "🔍 Полный аудит (6 агентов)")
+    await run_crew_command(update, run_full_audit, "full_audit.md", "🔍 Полный аудит (6 агентов)")
 
 async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_single_agent("tech", SIRNIKE_CODE), "tech_report.md", "⚙️ Tech-агент")
+    await run_crew_command(update, lambda: run_single_agent("tech"), "tech_report.md", "⚙️ Tech-агент")
 
 async def cmd_ux(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_single_agent("ux", SIRNIKE_CODE), "ux_report.md", "👤 UX-агент")
+    await run_crew_command(update, lambda: run_single_agent("ux"), "ux_report.md", "👤 UX-агент")
 
 async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_single_agent("security", SIRNIKE_CODE), "security_report.md", "🔒 Security-агент")
+    await run_crew_command(update, lambda: run_single_agent("security"), "security_report.md", "🔒 Security-агент")
 
 async def cmd_marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_single_agent("marketing", SIRNIKE_CODE), "marketing_report.md", "📊 Marketing-агент")
+    await run_crew_command(update, lambda: run_single_agent("marketing"), "marketing_report.md", "📊 Marketing-агент")
 
 async def cmd_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_single_agent("database", SIRNIKE_CODE), "database_report.md", "🗄️ Database-агент")
+    await run_crew_command(update, lambda: run_single_agent("database"), "database_report.md", "🗄️ Database-агент")
 
 async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_crew_command(update, lambda: run_single_agent("performance", SIRNIKE_CODE), "performance_report.md", "⚡ Performance-агент")
+    await run_crew_command(update, lambda: run_single_agent("performance"), "performance_report.md", "⚡ Performance-агент")
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
         return
-    global SIRNIKE_CODE, CODE_LOAD_ERRORS
+    global CODE_FILES, CODE_LOAD_ERRORS
     msg = await update.message.reply_text("Загружаю код с GitHub...")
     async with RELOAD_LOCK:
-        SIRNIKE_CODE, CODE_LOAD_ERRORS = await asyncio.get_event_loop().run_in_executor(
+        CODE_FILES, CODE_LOAD_ERRORS = await asyncio.get_event_loop().run_in_executor(
             None, load_code_from_github
         )
     if CODE_LOAD_ERRORS:
         await msg.edit_text(f"⚠️ Не удалось загрузить: {', '.join(CODE_LOAD_ERRORS)}\nПроверь репо и повтори /reload.")
     else:
-        await msg.edit_text(f"✅ Загружено {len(SIRNIKE_CODE):,} символов из {GITHUB_REPO}")
+        total = sum(len(v) for v in CODE_FILES.values())
+        await msg.edit_text(f"✅ Загружено {len(CODE_FILES)} файлов, {total:,} символов из {GITHUB_REPO}")
 
 
 async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -341,7 +322,8 @@ async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results.append(f"{'✅' if not failed else '❌'} GitHub: {'все файлы загружены' if not failed else ', '.join(failed)}")
     results.append(f"✅ Groq API: ключ {'настроен' if GROQ_API_KEY else '❌ не задан'}")
     results.append(f"✅ Агентов: {len(AGENTS_CONFIG)} ({', '.join(AGENTS_CONFIG.keys())})")
-    results.append(f"✅ Код: {len(SIRNIKE_CODE):,} символов")
+    total = sum(len(v) for v in CODE_FILES.values())
+    results.append(f"✅ Код: {total:,} символов в {len(CODE_FILES)} файлах (обрезка по {MAX_FILE_CHARS:,})")
 
     await msg.edit_text("Самодиагностика:\n\n" + "\n".join(results))
 
@@ -375,7 +357,7 @@ async def auto_audit_loop(app):
         await asyncio.sleep(interval)
         try:
             result = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: run_full_audit(SIRNIKE_CODE)
+                None, run_full_audit
             )
             doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_audit.md")
             await app.bot.send_document(
@@ -410,7 +392,8 @@ def main():
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
 
-    logger.info("Agent bot started (CrewAI + Groq). Repo: %s, Code: %d chars", GITHUB_REPO, len(SIRNIKE_CODE))
+    total = sum(len(v) for v in CODE_FILES.values())
+    logger.info("Agent bot started (CrewAI + Groq). Repo: %s, Files: %d, Chars: %d", GITHUB_REPO, len(CODE_FILES), total)
     app.run_polling()
 
 
