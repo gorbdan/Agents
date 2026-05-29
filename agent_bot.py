@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 
 AGENT_BOT_TOKEN = os.environ["AGENT_BOT_TOKEN"]
 GROQ_API_KEY    = os.environ["GROQ_API_KEY"]
+# Убираем Google-ключи чтобы CrewAI не переключился на Gemini автоматически
+os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("GOOGLE_API_KEY", None)
+os.environ.pop("GOOGLE_GEMINI_API_KEY", None)
 GITHUB_REPO     = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW   = os.environ.get("ADMIN_IDS", "")
