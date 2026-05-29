@@ -1,6 +1,6 @@
 """
 Агент-бот для Сырника — CrewAI версия.
-6 специализированных агентов на Gemini (бесплатно).
+6 специализированных агентов на Groq (бесплатно).
 Команды: /audit, /tech, /ux, /security, /marketing, /database, /performance
 """
 
@@ -22,9 +22,7 @@ logger = logging.getLogger(__name__)
 # ── Конфиг ───────────────────────────────────────────────────────────────────
 
 AGENT_BOT_TOKEN = os.environ["AGENT_BOT_TOKEN"]
-GEMINI_API_KEY  = os.environ["GEMINI_API_KEY"]
-# LiteLLM (движок CrewAI) читает ключ через GOOGLE_API_KEY
-os.environ["GOOGLE_API_KEY"] = GEMINI_API_KEY
+GROQ_API_KEY    = os.environ["GROQ_API_KEY"]
 GITHUB_REPO     = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW   = os.environ.get("ADMIN_IDS", "")
@@ -78,8 +76,8 @@ else:
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
 def make_llm() -> LLM:
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
-    return LLM(model=model, api_key=GEMINI_API_KEY)
+    model = os.environ.get("LLM_MODEL", "groq/llama-3.3-70b-versatile")
+    return LLM(model=model, api_key=GROQ_API_KEY)
 
 # ── Агенты ────────────────────────────────────────────────────────────────────
 
@@ -331,7 +329,7 @@ async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     _, failed = load_code_from_github()
     results.append(f"{'✅' if not failed else '❌'} GitHub: {'все файлы загружены' if not failed else ', '.join(failed)}")
-    results.append(f"✅ Gemini API: ключ {'настроен' if GEMINI_API_KEY else '❌ не задан'}")
+    results.append(f"✅ Groq API: ключ {'настроен' if GROQ_API_KEY else '❌ не задан'}")
     results.append(f"✅ Агентов: {len(AGENTS_CONFIG)} ({', '.join(AGENTS_CONFIG.keys())})")
     results.append(f"✅ Код: {len(SIRNIKE_CODE):,} символов")
 
