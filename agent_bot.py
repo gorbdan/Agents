@@ -184,7 +184,7 @@ def call_gemini_agent(agent_key: str) -> str:
         config=types.GenerateContentConfig(
             system_instruction=system,
             temperature=0.2,
-            max_output_tokens=4000,
+            max_output_tokens=8000,
         ),
     )
     return response.text
