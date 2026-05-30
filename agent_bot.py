@@ -1,5 +1,5 @@
 """
-Агент-бот для Сырника — Vertex AI (Gemini) версия.
+Агент-бот для Сырника — Gemini API версия (AI Studio, бесплатный tier).
 6 специализированных агентов. Контекст 1M токенов — весь код целиком.
 Команды: /audit, /tech, /ux, /security, /marketing, /database, /performance
 """
@@ -8,7 +8,6 @@ import asyncio
 import io
 import logging
 import os
-import tempfile
 import urllib.request
 import urllib.error
 
@@ -23,29 +22,17 @@ logger = logging.getLogger(__name__)
 # ── Конфиг ───────────────────────────────────────────────────────────────────
 
 AGENT_BOT_TOKEN  = os.environ["AGENT_BOT_TOKEN"]
-GOOGLE_PROJECT_ID = os.environ["GOOGLE_PROJECT_ID"]
-VERTEX_LOCATION  = os.environ.get("VERTEX_LOCATION", "us-central1")
-GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-001")
+GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
+GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
 GITHUB_REPO      = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN     = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW    = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS        = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
 AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))
 
-# Записываем JSON сервисного аккаунта во временный файл для google SDK
-_SA_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
-if _SA_JSON:
-    _sa_file = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
-    _sa_file.write(_SA_JSON)
-    _sa_file.close()
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = _sa_file.name
-    logger.info("Service account credentials loaded from env")
-else:
-    logger.warning("GOOGLE_SERVICE_ACCOUNT_JSON not set — will try ADC")
-
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
 
-logger.info("Repo: %r | Project: %s | Location: %s", GITHUB_REPO, GOOGLE_PROJECT_ID, VERTEX_LOCATION)
+logger.info("Repo: %r | Model: %s", GITHUB_REPO, GEMINI_MODEL)
 
 # ── GitHub ────────────────────────────────────────────────────────────────────
 
@@ -103,7 +90,7 @@ else:
 # ── Gemini клиент ─────────────────────────────────────────────────────────────
 
 def make_client() -> genai.Client:
-    return genai.Client(vertexai=True, project=GOOGLE_PROJECT_ID, location=VERTEX_LOCATION)
+    return genai.Client(api_key=GEMINI_API_KEY)
 
 # ── Агенты ────────────────────────────────────────────────────────────────────
 
@@ -345,8 +332,8 @@ def main():
     app.add_handler(CommandHandler("selftest", cmd_selftest))
 
     total = sum(len(v) for v in CODE_FILES.values())
-    logger.info("Agent bot started (Vertex AI Gemini). Repo: %s, Files: %d, Chars: %d",
-                GITHUB_REPO, len(CODE_FILES), total)
+    logger.info("Agent bot started (Gemini API). Repo: %s, Model: %s, Files: %d, Chars: %d",
+                GITHUB_REPO, GEMINI_MODEL, len(CODE_FILES), total)
     app.run_polling()
 
 
