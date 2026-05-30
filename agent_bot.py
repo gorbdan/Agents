@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 AGENT_BOT_TOKEN  = os.environ["AGENT_BOT_TOKEN"]
 GEMINI_API_KEY   = os.environ["GEMINI_API_KEY"]
-GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+GEMINI_MODEL     = "gemini-2.0-flash"
 GITHUB_REPO      = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN     = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW    = os.environ.get("ADMIN_IDS", "")
