@@ -27,10 +27,10 @@ GITHUB_TOKEN    = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW   = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS       = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
 AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))
-GROQ_MODEL      = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL      = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
-MAX_FILE_CHARS = 5000   # ~1.25k токенов на файл; оставляем запас для промпта
+MAX_FILE_CHARS = 14000  # ~3.5k токенов на файл; llama-3.1-8b-instant лимит 20k TPM
 
 logger.info("Repo: %r", GITHUB_REPO)
 
