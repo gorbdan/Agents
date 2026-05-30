@@ -24,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 AGENT_BOT_TOKEN  = os.environ["AGENT_BOT_TOKEN"]
 GOOGLE_PROJECT_ID = os.environ["GOOGLE_PROJECT_ID"]
-VERTEX_LOCATION  = os.environ.get("VERTEX_LOCATION", "europe-west4")
-GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+VERTEX_LOCATION  = os.environ.get("VERTEX_LOCATION", "us-central1")
+GEMINI_MODEL     = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-001")
 GITHUB_REPO      = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN     = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW    = os.environ.get("ADMIN_IDS", "")
