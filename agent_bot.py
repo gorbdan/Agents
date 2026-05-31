@@ -1,15 +1,20 @@
 """
-Агент-бот для Сырника — Claude (Anthropic) версия.
-6 специализированных агентов. Контекст 200k токенов — весь код целиком.
-Команды: /audit, /tech, /ux, /security, /marketing, /database, /performance
+Агент-бот для Сырника — Claude (Anthropic) с prompt caching, верификацией,
+автосозданием GitHub Issues и web-search для UX/конкурентов.
+
+Команды: /audit, /tech, /ux, /security, /marketing, /database, /performance,
+         /competitor, /reload, /selftest
 """
 
 import asyncio
 import io
+import json
 import logging
 import os
+import re
 import urllib.request
 import urllib.error
+from dataclasses import dataclass, field
 
 import anthropic
 from telegram import Update, InputFile
@@ -31,9 +36,10 @@ AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))
 
 GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
 
-logger.info("Repo: %r | Model: %s", GITHUB_REPO, CLAUDE_MODEL)
+logger.info("Repo: %r | Model: %s | Issues: %s",
+            GITHUB_REPO, CLAUDE_MODEL, "ON" if GITHUB_TOKEN else "OFF (no token)")
 
-# ── GitHub ────────────────────────────────────────────────────────────────────
+# ── GitHub: получение файлов ─────────────────────────────────────────────────
 
 def fetch_github_file(repo: str, filepath: str, token: str = "") -> str | None:
     url = f"https://raw.githubusercontent.com/{repo}/main/{filepath}"
@@ -65,9 +71,10 @@ def load_code_from_github() -> tuple[dict[str, str], list[str]]:
     return files, failed
 
 
-def build_code_block(files: dict[str, str], filenames: list[str]) -> str:
+def build_full_code_block(files: dict[str, str]) -> str:
+    """Собирает ВСЕ файлы в один блок — для prompt caching общий префикс."""
     parts = []
-    for fname in filenames:
+    for fname in GITHUB_FILES:
         if fname not in files:
             continue
         lang = "python" if fname.endswith(".py") else "text"
@@ -86,12 +93,60 @@ else:
     total = sum(len(v) for v in CODE_FILES.values())
     logger.info("Loaded %d files, %d chars total", len(CODE_FILES), total)
 
+# ── GitHub Issues: создание и дедуп ──────────────────────────────────────────
+
+def _gh_request(method: str, path: str, body: dict | None = None) -> dict | list | None:
+    if not GITHUB_TOKEN:
+        return None
+    url = f"https://api.github.com{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Authorization", f"token {GITHUB_TOKEN}")
+    req.add_header("Accept", "application/vnd.github+json")
+    req.add_header("User-Agent", "SirnikeAgentBot/1.0")
+    if body:
+        req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        logger.warning("GitHub API %s %s: HTTP %s — %s",
+                       method, path, e.code, e.read().decode("utf-8", errors="ignore")[:200])
+        return None
+    except Exception as e:
+        logger.warning("GitHub API %s %s: %s", method, path, e)
+        return None
+
+
+def _normalize_title(s: str) -> str:
+    """Нормализация для дедупа: lowercase, убираем спецсимволы и эмодзи."""
+    s = re.sub(r"[^\w\s]", "", s.lower())
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def fetch_open_audit_issues() -> list[dict]:
+    """Все открытые issues с лейблом auto-audit (для дедупа)."""
+    result = _gh_request("GET", f"/repos/{GITHUB_REPO}/issues?state=open&labels=auto-audit&per_page=100")
+    if not result:
+        return []
+    return [i for i in result if "pull_request" not in i]
+
+
+def create_github_issue(title: str, body: str, labels: list[str]) -> str | None:
+    """Создаёт issue, возвращает URL. None если выключено или ошибка."""
+    result = _gh_request("POST", f"/repos/{GITHUB_REPO}/issues",
+                         {"title": title, "body": body, "labels": labels})
+    if result and "html_url" in result:
+        return result["html_url"]
+    return None
+
+
 # ── Anthropic клиент ──────────────────────────────────────────────────────────
 
 def make_client() -> anthropic.Anthropic:
     return anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# ── Агенты ────────────────────────────────────────────────────────────────────
+# ── Агенты: конфиг ────────────────────────────────────────────────────────────
 
 BOT_CONTEXT = """Telegram-бот "Сырник" — AI-генератор изображений и видео.
 Стек: Python 3.12, python-telegram-bot, SQLite, aiohttp.
@@ -103,86 +158,356 @@ AGENTS_CONFIG = {
     "tech": {
         "role": "Технический аналитик Python/asyncio",
         "focus": "необработанные исключения, потери изюминок при крашах, проблемы очереди генерации, утечки памяти",
-        "files": ["SirNike.py", "requirements.txt", "AGENT_NOTES.md"],
     },
     "ux": {
         "role": "UX-аналитик Telegram-ботов",
-        "focus": "тексты сообщений, онбординг новых пользователей, кнопки, сценарии, ошибки которые видит юзер",
-        "files": ["SirNike.py", "AGENT_NOTES.md"],
+        "focus": "тексты сообщений, онбординг новых пользователей, кнопки, сценарии, ошибки которые видит юзер. Сравнивай с топовыми Telegram-ботами через web search.",
+        "use_web_search": True,
     },
     "security": {
         "role": "Security-аналитик платёжных систем",
         "focus": "валидация платёжных payload, SQL-запросы, защита от накрутки, безопасность API",
-        "files": ["SirNike.py", "config.py", "AGENT_NOTES.md"],
     },
     "marketing": {
         "role": "Growth-менеджер Telegram-ботов",
         "focus": "реферальная система, пакеты изюминок, бесплатные генерации, конверсия в покупку, retention",
-        "files": ["SirNike.py", "AGENT_NOTES.md"],
     },
     "database": {
         "role": "Database-инженер SQLite",
         "focus": "транзакции, INSERT OR IGNORE, потеря данных при сбоях, схема БД, дублирование",
-        "files": ["db.py", "SirNike.py", "AGENT_NOTES.md"],
     },
     "performance": {
         "role": "Performance-инженер Python",
         "focus": "очередь генерации, кэш изображений, медленные DB-запросы, блокирующий I/O в async-контексте",
-        "files": ["SirNike.py", "AGENT_NOTES.md"],
     },
 }
 
-SYSTEM_PROMPT = """Ты {role}. Анализируй код Telegram-бота "Сырник".
+FINDING_INSTRUCTIONS = """СТРОГИЕ ПРАВИЛА:
+1. Пиши ТОЛЬКО о реально найденных проблемах в коде.
+2. Каждая находка обязана содержать точную цитату кода и номер строки.
+3. НЕ повторяй находки из AGENT_NOTES.md.
+4. Если проблем нет — напиши только: "Проблем не обнаружено."
 
-Контекст: {bot_context}
+ФОРМАТ КАЖДОЙ НАХОДКИ (строго, без отклонений):
 
-СТРОГИЕ ПРАВИЛА:
-1. Пиши ТОЛЬКО о том что реально видишь в предоставленном коде.
-2. Каждая находка ОБЯЗАНА содержать цитату конкретной строки кода.
-3. НЕ пиши шаблонные советы без конкретного места в коде.
-4. Если проблем нет — напиши: "В коде проблем не обнаружено."
-5. Не повторяй находки из AGENT_NOTES.md — они уже известны.
+## {emoji} [файл.py:номер_строки] Короткое название
 
-Для каждой находки:
-- Цитата: `конкретная строка кода`
-- Описание проблемы
-- Сценарий воспроизведения
-- Серьёзность: 🔴 критично / 🟡 важно / 🟢 незначительно
-- Предложение по фиксу
+**Код:**
+```python
+точная_строка_кода_из_файла
+```
 
-Фокус: {focus}
+**Проблема:** что именно не так
+
+**Воспроизведение:** как баг проявится у пользователя
+
+**Фикс:** конкретное предложение
+
+---
+
+Где {emoji} = 🔴 если критично, 🟡 если важно, 🟢 если незначительно.
+
 Отвечай на русском."""
+
+ANALYZER_USER_MSG = "Проанализируй код Сырника и найди проблемы по своей специализации. Соблюдай формат строго."
+
+
+def _build_cached_system(extra: str = "") -> list[dict]:
+    """Системный промпт с кешированным префиксом (контекст + код)."""
+    code = build_full_code_block(CODE_FILES)
+    cached_text = f"Контекст бота:\n{BOT_CONTEXT}\n\n--- КОД БОТА ---\n\n{code}"
+    blocks = [
+        {
+            "type": "text",
+            "text": cached_text,
+            "cache_control": {"type": "ephemeral"},
+        }
+    ]
+    if extra:
+        blocks.append({"type": "text", "text": extra})
+    return blocks
 
 
 def call_agent(agent_key: str) -> str:
+    """Запускает агента-анализатора с prompt caching."""
     cfg = AGENTS_CONFIG[agent_key]
-    code = build_code_block(CODE_FILES, cfg["files"])
     client = make_client()
 
-    system = SYSTEM_PROMPT.format(
-        role=cfg["role"],
-        bot_context=BOT_CONTEXT,
-        focus=cfg["focus"],
+    role_text = f"Ты {cfg['role']}.\n\nФокус анализа: {cfg['focus']}\n\n{FINDING_INSTRUCTIONS}"
+    system = _build_cached_system(role_text)
+
+    kwargs: dict = {
+        "model": CLAUDE_MODEL,
+        "max_tokens": 8000,
+        "system": system,
+        "messages": [{"role": "user", "content": ANALYZER_USER_MSG}],
+    }
+    if cfg.get("use_web_search"):
+        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
+
+    response = client.messages.create(**kwargs)
+    return _extract_text(response)
+
+
+def _extract_text(response) -> str:
+    """Достаёт текст из ответа (может быть несколько блоков если был tool_use)."""
+    parts = []
+    for block in response.content:
+        if hasattr(block, "text") and block.text:
+            parts.append(block.text)
+    return "\n\n".join(parts) if parts else ""
+
+
+# ── Парсер находок ────────────────────────────────────────────────────────────
+
+@dataclass
+class Finding:
+    severity: str       # "critical" / "important" / "minor"
+    emoji: str          # 🔴 / 🟡 / 🟢
+    file: str
+    line: str
+    title: str
+    raw: str            # полный блок находки
+    code: str = ""
+    problem: str = ""
+    fix: str = ""
+    confirmed: bool = True
+    rejection_reason: str = ""
+    issue_url: str = ""
+
+
+SEVERITY_BY_EMOJI = {"🔴": "critical", "🟡": "important", "🟢": "minor"}
+
+FINDING_HEADER_RE = re.compile(
+    r"^##\s*(🔴|🟡|🟢)\s*\[([^\]:]+):(\d+|N/A|\?)\]\s*(.+?)$",
+    re.MULTILINE,
+)
+
+
+def parse_findings(text: str) -> list[Finding]:
+    """Извлекает структурированные находки из markdown-ответа агента."""
+    if not text or "проблем не обнаружено" in text.lower():
+        return []
+
+    # Находим все заголовки и режем текст между ними
+    matches = list(FINDING_HEADER_RE.finditer(text))
+    findings = []
+    for i, m in enumerate(matches):
+        start = m.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+        block = text[start:end].strip()
+        emoji, fname, line, title = m.group(1), m.group(2), m.group(3), m.group(4).strip()
+
+        # Достаём код, проблему, фикс из блока
+        code_m = re.search(r"\*\*Код:\*\*\s*```\w*\n(.*?)\n```", block, re.DOTALL)
+        prob_m = re.search(r"\*\*Проблема:\*\*\s*(.+?)(?=\n\n\*\*|\n---|\Z)", block, re.DOTALL)
+        fix_m  = re.search(r"\*\*Фикс:\*\*\s*(.+?)(?=\n\n\*\*|\n---|\Z)", block, re.DOTALL)
+
+        findings.append(Finding(
+            severity=SEVERITY_BY_EMOJI.get(emoji, "important"),
+            emoji=emoji,
+            file=fname.strip(),
+            line=line.strip(),
+            title=title,
+            raw=block,
+            code=code_m.group(1).strip() if code_m else "",
+            problem=prob_m.group(1).strip() if prob_m else "",
+            fix=fix_m.group(1).strip() if fix_m else "",
+        ))
+    return findings
+
+
+# ── Верификатор ───────────────────────────────────────────────────────────────
+
+VERIFIER_INSTRUCTIONS = """Ты — строгий верификатор багов. Получаешь список находок другого агента.
+Для КАЖДОЙ находки проверь по реальному коду:
+- цитата кода точная (есть в файле на указанной строке)?
+- проблема реальная (а не выдумка/устаревшая инфа)?
+- баг не из AGENT_NOTES.md (там уже известные)?
+
+Для каждой находки выведи СТРОГО одну строку:
+FINDING #N: CONFIRMED
+или
+FINDING #N: REJECTED — короткая причина
+
+Нумерация с 1. Без других пояснений. Будь строгим — лучше отбросить настоящее, чем оставить ложное."""
+
+
+def verify_findings(findings: list[Finding]) -> list[Finding]:
+    """Запускает верификатора, помечает каждую находку confirmed=True/False."""
+    if not findings:
+        return findings
+    client = make_client()
+    findings_block = "\n\n".join(
+        f"FINDING #{i+1}:\n{f.raw}" for i, f in enumerate(findings)
     )
+    system = _build_cached_system(VERIFIER_INSTRUCTIONS)
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=2000,
+        system=system,
+        messages=[{"role": "user", "content": f"Проверь эти находки:\n\n{findings_block}"}],
+    )
+    text = _extract_text(response)
+
+    verdicts = re.findall(r"FINDING #(\d+):\s*(CONFIRMED|REJECTED)(?:\s*[—\-:]\s*(.+))?",
+                          text, re.IGNORECASE)
+    verdict_map = {int(n): (v.upper(), (r or "").strip()) for n, v, r in verdicts}
+
+    for i, f in enumerate(findings, start=1):
+        verdict, reason = verdict_map.get(i, ("CONFIRMED", ""))
+        f.confirmed = verdict == "CONFIRMED"
+        f.rejection_reason = reason
+    return findings
+
+
+# ── GitHub Issues для подтверждённых находок ─────────────────────────────────
+
+def _issue_dedup_key(agent: str, f: Finding) -> str:
+    return _normalize_title(f"{agent} {f.file} {f.line} {f.title}")
+
+
+def push_findings_to_issues(agent_key: str, findings: list[Finding]) -> int:
+    """Создаёт GitHub Issues для подтверждённых, с дедупом. Возвращает кол-во созданных."""
+    if not GITHUB_TOKEN:
+        logger.info("GITHUB_TOKEN отсутствует — issues не создаются")
+        return 0
+
+    open_issues = fetch_open_audit_issues()
+    existing_keys = set()
+    for issue in open_issues:
+        # ключ дедупа берём из title issue
+        existing_keys.add(_normalize_title(issue.get("title", "")))
+
+    created = 0
+    for f in findings:
+        if not f.confirmed:
+            continue
+        title = f"[{agent_key}] {f.emoji} {f.file}:{f.line} — {f.title}"
+        norm = _normalize_title(title)
+        # Простой дедуп: либо точное совпадение, либо существенное пересечение
+        if norm in existing_keys or any(norm in k or k in norm for k in existing_keys if len(k) > 20):
+            logger.info("Issue дубликат, пропускаю: %s", title[:80])
+            continue
+
+        body = (
+            f"**Файл:** `{f.file}` (строка {f.line})\n\n"
+            f"**Код:**\n```python\n{f.code}\n```\n\n"
+            f"**Проблема:** {f.problem}\n\n"
+            f"**Предложение по фиксу:** {f.fix}\n\n"
+            f"---\n*Создано автоматически агентом `{agent_key}` ({f.emoji} {f.severity}).*"
+        )
+        labels = ["auto-audit", f"agent:{agent_key}", f"severity:{f.severity}"]
+        url = create_github_issue(title, body, labels)
+        if url:
+            f.issue_url = url
+            created += 1
+            logger.info("Issue создан: %s", url)
+    return created
+
+
+# ── Competitor агент (отдельный, с web search) ───────────────────────────────
+
+COMPETITOR_PROMPT = """Ты — продуктовый аналитик Telegram-ботов. Используй web search чтобы:
+
+1. Найти топ-10 Telegram-ботов для генерации изображений и видео (русский и англоязычный рынок).
+   Поисковые запросы: "топ telegram bot AI генерация изображений 2026", "best telegram AI image bot",
+   "Midjourney telegram alternative", "telegram бот нейросеть рисует".
+
+2. Для каждого конкурента собери:
+   - Название и @username (если есть)
+   - Ключевые фичи
+   - Модель монетизации (подписка/токены/разово)
+   - Цены
+   - Сильные UX-фишки (что цепляет пользователя)
+
+3. Сравни с Сырником (наш бот):
+   - Валюта: изюминки (purchaseable + бесплатные)
+   - Провайдеры: Zveno/Gemini, MashaGPT, YesAPI, Seedance видео
+   - Реферальная система
+   - Что есть у конкурентов и нет у нас?
+
+4. Выдай 5–10 КОНКРЕТНЫХ улучшений для Сырника в формате:
+
+## 🎯 [Категория] Название улучшения
+
+**Что есть у конкурента:** название бота + фича
+
+**Что у нас:** текущее состояние
+
+**Предложение:** конкретный шаг
+
+**Ожидаемый эффект:** retention/конверсия/wow
+
+---
+
+Отвечай на русском. Будь конкретным, без воды."""
+
+
+def call_competitor_agent() -> str:
+    client = make_client()
+    system = _build_cached_system(COMPETITOR_PROMPT)
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=8000,
         system=system,
-        messages=[{"role": "user", "content": f"Вот код для анализа:\n\n{code}"}],
+        messages=[{"role": "user", "content": "Начинай исследование. Используй web search активно."}],
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 10}],
     )
-    return response.content[0].text
+    return _extract_text(response)
+
+
+# ── Оркестрация ───────────────────────────────────────────────────────────────
+
+def run_agent_with_verification(agent_key: str) -> str:
+    """Анализатор → парсер → верификатор → issues → итоговый markdown."""
+    cfg = AGENTS_CONFIG[agent_key]
+    logger.info("[%s] анализирую...", agent_key)
+    raw = call_agent(agent_key)
+
+    findings = parse_findings(raw)
+    if not findings:
+        return f"## {cfg['role']}\n\n{raw}\n\n_Структурированных находок не найдено._"
+
+    logger.info("[%s] найдено %d, верифицирую...", agent_key, len(findings))
+    findings = verify_findings(findings)
+    confirmed = [f for f in findings if f.confirmed]
+    rejected = [f for f in findings if not f.confirmed]
+    logger.info("[%s] подтверждено %d, отклонено %d", agent_key, len(confirmed), len(rejected))
+
+    issues_created = push_findings_to_issues(agent_key, confirmed)
+    logger.info("[%s] создано issues: %d", agent_key, issues_created)
+
+    # Формируем отчёт
+    parts = [f"## {cfg['role']}\n"]
+    parts.append(f"_Найдено: {len(findings)} | Подтверждено: {len(confirmed)} | "
+                 f"Отклонено: {len(rejected)} | GitHub Issues: {issues_created}_\n")
+
+    if confirmed:
+        parts.append("### ✅ Подтверждённые находки\n")
+        for f in confirmed:
+            block = f.raw
+            if f.issue_url:
+                block += f"\n\n🔗 **Issue:** {f.issue_url}"
+            parts.append(block)
+            parts.append("---")
+
+    if rejected:
+        parts.append("\n### ❌ Отклонено верификатором\n")
+        for f in rejected:
+            parts.append(f"- **{f.title}** ({f.file}:{f.line}) — _{f.rejection_reason or 'без причины'}_")
+
+    return "\n\n".join(parts)
 
 
 def run_full_audit() -> str:
     results = []
-    for key, cfg in AGENTS_CONFIG.items():
-        logger.info("Running agent: %s", key)
+    for key in AGENTS_CONFIG:
         try:
-            result = call_agent(key)
-            results.append(f"## {cfg['role']}\n\n{result}")
+            results.append(run_agent_with_verification(key))
         except Exception as e:
             logger.exception("Agent %s failed", key)
-            results.append(f"## {cfg['role']}\n\n❌ Ошибка: {e}")
+            results.append(f"## {AGENTS_CONFIG[key]['role']}\n\n❌ Ошибка: {e}")
     return "# Полный аудит Сырника\n\n" + "\n\n---\n\n".join(results)
 
 
@@ -198,7 +523,7 @@ async def run_agent_command(update: Update, runner_fn, filename: str, label: str
     if not CODE_FILES:
         await update.message.reply_text("Код не загружен. Сделай /reload.")
         return
-    msg = await update.message.reply_text(f"{label} работает... ⏳\n(пара минут)")
+    msg = await update.message.reply_text(f"{label} работает... ⏳")
     try:
         result = await asyncio.get_event_loop().run_in_executor(None, runner_fn)
         try:
@@ -213,25 +538,28 @@ async def run_agent_command(update: Update, runner_fn, filename: str, label: str
 
 
 async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, run_full_audit, "full_audit.md", "🔍 Полный аудит (6 агентов)")
+    await run_agent_command(update, run_full_audit, "full_audit.md", "🔍 Полный аудит (6 агентов + верификация + issues)")
 
 async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: call_agent("tech"), "tech_report.md", "⚙️ Tech-агент")
+    await run_agent_command(update, lambda: run_agent_with_verification("tech"), "tech_report.md", "⚙️ Tech")
 
 async def cmd_ux(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: call_agent("ux"), "ux_report.md", "👤 UX-агент")
+    await run_agent_command(update, lambda: run_agent_with_verification("ux"), "ux_report.md", "👤 UX")
 
 async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: call_agent("security"), "security_report.md", "🔒 Security-агент")
+    await run_agent_command(update, lambda: run_agent_with_verification("security"), "security_report.md", "🔒 Security")
 
 async def cmd_marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: call_agent("marketing"), "marketing_report.md", "📊 Marketing-агент")
+    await run_agent_command(update, lambda: run_agent_with_verification("marketing"), "marketing_report.md", "📊 Marketing")
 
 async def cmd_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: call_agent("database"), "database_report.md", "🗄️ Database-агент")
+    await run_agent_command(update, lambda: run_agent_with_verification("database"), "database_report.md", "🗄️ Database")
 
 async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: call_agent("performance"), "performance_report.md", "⚡ Performance-агент")
+    await run_agent_command(update, lambda: run_agent_with_verification("performance"), "performance_report.md", "⚡ Performance")
+
+async def cmd_competitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_agent_command(update, call_competitor_agent, "competitor_report.md", "🎯 Competitor research (web search)")
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -258,22 +586,41 @@ async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _, failed = load_code_from_github()
     results.append(f"{'✅' if not failed else '❌'} GitHub: {'OK' if not failed else ', '.join(failed)}")
     results.append(f"✅ Модель: {CLAUDE_MODEL}")
-    results.append(f"✅ Агентов: {len(AGENTS_CONFIG)}")
+    results.append(f"{'✅' if GITHUB_TOKEN else '⚠️'} GitHub Issues: {'ON' if GITHUB_TOKEN else 'OFF (нет GITHUB_TOKEN)'}")
+    results.append(f"✅ Агентов с верификацией: {len(AGENTS_CONFIG)}")
     total = sum(len(v) for v in CODE_FILES.values())
     results.append(f"✅ Код: {total:,} символов в {len(CODE_FILES)} файлах")
+
+    # Проверим Anthropic API ping
+    try:
+        client = make_client()
+        r = client.messages.create(
+            model=CLAUDE_MODEL, max_tokens=10,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        results.append(f"✅ Anthropic API: OK ({r.usage.input_tokens}in/{r.usage.output_tokens}out)")
+    except Exception as e:
+        results.append(f"❌ Anthropic API: {e}")
+
+    # Проверим GitHub Issues API
+    if GITHUB_TOKEN:
+        issues = fetch_open_audit_issues()
+        results.append(f"✅ Open auto-audit issues: {len(issues)}")
+
     await msg.edit_text("Самодиагностика:\n\n" + "\n".join(results))
 
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Агенты Сырника 🧀\n\n"
-        "/audit — полный аудит (все 6 агентов)\n\n"
+        "/audit — полный аудит (6 агентов + верификация + GitHub Issues)\n\n"
         "/tech — технические баги\n"
-        "/ux — пользовательский опыт\n"
+        "/ux — UX (с web search конкурентов)\n"
         "/security — безопасность и платежи\n"
         "/marketing — монетизация и рефералы\n"
         "/database — целостность данных\n"
         "/performance — производительность\n\n"
+        "/competitor — глубокое исследование конкурентов\n\n"
         "/reload — обновить код с GitHub\n"
         "/selftest — проверить что всё работает"
     )
@@ -323,6 +670,7 @@ def main():
     app.add_handler(CommandHandler("marketing", cmd_marketing))
     app.add_handler(CommandHandler("database", cmd_database))
     app.add_handler(CommandHandler("performance", cmd_performance))
+    app.add_handler(CommandHandler("competitor", cmd_competitor))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
 
