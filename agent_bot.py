@@ -158,27 +158,45 @@ AGENTS_CONFIG = {
     "tech": {
         "role": "Технический аналитик Python/asyncio",
         "focus": "необработанные исключения, потери изюминок при крашах, проблемы очереди генерации, утечки памяти",
+        "keywords": ["async def", "try:", "except", "asyncio", "Queue", "create_task",
+                     "gather", "wait_for", "raise", "TimeoutError", "CancelledError"],
+        "files": ["SirNike.py", "requirements.txt", "AGENT_NOTES.md"],
     },
     "ux": {
         "role": "UX-аналитик Telegram-ботов",
-        "focus": "тексты сообщений, онбординг новых пользователей, кнопки, сценарии, ошибки которые видит юзер. Сравнивай с топовыми Telegram-ботами через web search.",
-        "use_web_search": True,
+        "focus": "тексты сообщений, онбординг новых пользователей, кнопки, сценарии, ошибки которые видит юзер",
+        "keywords": ["reply_text", "send_message", "InlineKeyboard", "ReplyKeyboard",
+                     "callback_query", "ParseMode", "edit_text", "answer", "BotCommand",
+                     "/start", "приветств", "ошибк", "извин"],
+        "files": ["SirNike.py", "AGENT_NOTES.md"],
     },
     "security": {
         "role": "Security-аналитик платёжных систем",
         "focus": "валидация платёжных payload, SQL-запросы, защита от накрутки, безопасность API",
+        "keywords": ["pre_checkout", "successful_payment", "execute", "INSERT", "UPDATE",
+                     "DELETE", "SELECT", "payload", "invoice", "token", "secret", "validate"],
+        "files": ["SirNike.py", "config.py", "AGENT_NOTES.md"],
     },
     "marketing": {
         "role": "Growth-менеджер Telegram-ботов",
         "focus": "реферальная система, пакеты изюминок, бесплатные генерации, конверсия в покупку, retention",
+        "keywords": ["referral", "referrer", "ref_", "izyuminki", "изюм", "bonus", "free",
+                     "package", "пакет", "промо", "promo", "discount", "skidka"],
+        "files": ["SirNike.py", "AGENT_NOTES.md"],
     },
     "database": {
         "role": "Database-инженер SQLite",
         "focus": "транзакции, INSERT OR IGNORE, потеря данных при сбоях, схема БД, дублирование",
+        "keywords": ["execute", "executemany", "commit", "rollback", "BEGIN", "INSERT",
+                     "UPDATE", "DELETE", "SELECT", "CREATE TABLE", "sqlite", "cursor", "fetchone"],
+        "files": ["db.py", "SirNike.py", "AGENT_NOTES.md"],
     },
     "performance": {
         "role": "Performance-инженер Python",
         "focus": "очередь генерации, кэш изображений, медленные DB-запросы, блокирующий I/O в async-контексте",
+        "keywords": ["queue", "cache", "sleep", "wait", "lock", "executor", "run_in_executor",
+                     "open(", "read(", "write(", "requests.", "urllib", "blocking"],
+        "files": ["SirNike.py", "AGENT_NOTES.md"],
     },
 }
 
@@ -211,41 +229,102 @@ FINDING_INSTRUCTIONS = """СТРОГИЕ ПРАВИЛА:
 
 ANALYZER_USER_MSG = "Проанализируй код Сырника и найди проблемы по своей специализации. Соблюдай формат строго."
 
+# Максимум символов кода в одном запросе (помещается в Tier 1: 50K ITPM)
+MAX_CODE_CHARS_PER_REQUEST = 120_000
 
-def _build_cached_system(extra: str = "") -> list[dict]:
-    """Системный промпт с кешированным префиксом (контекст + код)."""
-    code = build_full_code_block(CODE_FILES)
-    cached_text = f"Контекст бота:\n{BOT_CONTEXT}\n\n--- КОД БОТА ---\n\n{code}"
-    blocks = [
-        {
-            "type": "text",
-            "text": cached_text,
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-    if extra:
-        blocks.append({"type": "text", "text": extra})
+
+def _split_python_into_blocks(code: str) -> list[tuple[int, str]]:
+    """Делит Python-код на top-level блоки (def/class/etc).
+    Возвращает [(start_line_number, block_text)].
+    """
+    lines = code.splitlines(keepends=True)
+    block_starts = [0]
+    for i, line in enumerate(lines):
+        if i == 0:
+            continue
+        # Начало нового top-level блока: строка без отступа, начинается с def/async/class/@
+        if line and line[0] not in (" ", "\t", "\n", "#"):
+            stripped = line.lstrip()
+            if stripped.startswith(("def ", "async def ", "class ", "@")):
+                block_starts.append(i)
+    block_starts.append(len(lines))
+    blocks = []
+    for j in range(len(block_starts) - 1):
+        start, end = block_starts[j], block_starts[j + 1]
+        blocks.append((start + 1, "".join(lines[start:end])))
     return blocks
 
 
+def slice_code_for_agent(file_content: str, keywords: list[str], max_chars: int) -> str:
+    """Извлекает функции/классы где есть keywords. Если ничего — голова файла."""
+    blocks = _split_python_into_blocks(file_content)
+    if not blocks:
+        return file_content[:max_chars]
+
+    keywords_lower = [k.lower() for k in keywords]
+    relevant = []
+    total = 0
+    for start_line, block in blocks:
+        text_lower = block.lower()
+        if any(kw in text_lower for kw in keywords_lower):
+            tagged = f"# ──── строка ~{start_line} ────\n{block}"
+            if total + len(tagged) > max_chars:
+                break
+            relevant.append(tagged)
+            total += len(tagged)
+
+    if not relevant:
+        # Fallback: первые N символов файла
+        return file_content[:max_chars]
+    return "\n".join(relevant)
+
+
+def build_code_for_agent(agent_key: str) -> str:
+    """Готовит блок кода для агента: режет SirNike.py по keywords, остальные файлы целиком."""
+    cfg = AGENTS_CONFIG[agent_key]
+    keywords = cfg.get("keywords", [])
+    files_to_send = cfg.get("files", GITHUB_FILES)
+
+    parts = []
+    # Маленькие файлы — целиком
+    small_budget = 0
+    for fname in files_to_send:
+        if fname not in CODE_FILES or fname == "SirNike.py":
+            continue
+        content = CODE_FILES[fname]
+        lang = "python" if fname.endswith(".py") else "text"
+        parts.append(f"### {fname}\n```{lang}\n{content}\n```")
+        small_budget += len(content)
+
+    # SirNike.py — урезаем по keywords
+    if "SirNike.py" in files_to_send and "SirNike.py" in CODE_FILES:
+        budget = MAX_CODE_CHARS_PER_REQUEST - small_budget
+        sliced = slice_code_for_agent(CODE_FILES["SirNike.py"], keywords, max_chars=budget)
+        parts.insert(0, f"### SirNike.py (релевантные функции)\n```python\n{sliced}\n```")
+
+    return "\n\n".join(parts)
+
+
 def call_agent(agent_key: str) -> str:
-    """Запускает агента-анализатора с prompt caching."""
+    """Запускает агента-анализатора. Шлёт только релевантный код (без caching)."""
     cfg = AGENTS_CONFIG[agent_key]
     client = make_client()
+    code = build_code_for_agent(agent_key)
 
-    role_text = f"Ты {cfg['role']}.\n\nФокус анализа: {cfg['focus']}\n\n{FINDING_INSTRUCTIONS}"
-    system = _build_cached_system(role_text)
+    system = (
+        f"Ты {cfg['role']}.\n\n"
+        f"Контекст бота: {BOT_CONTEXT}\n\n"
+        f"Фокус анализа: {cfg['focus']}\n\n"
+        f"{FINDING_INSTRUCTIONS}"
+    )
 
-    kwargs: dict = {
-        "model": CLAUDE_MODEL,
-        "max_tokens": 8000,
-        "system": system,
-        "messages": [{"role": "user", "content": ANALYZER_USER_MSG}],
-    }
-    if cfg.get("use_web_search"):
-        kwargs["tools"] = [{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}]
-
-    response = client.messages.create(**kwargs)
+    logger.info("[%s] отправляю %d chars кода", agent_key, len(code))
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=8000,
+        system=system,
+        messages=[{"role": "user", "content": f"{ANALYZER_USER_MSG}\n\n{code}"}],
+    )
     return _extract_text(response)
 
 
@@ -333,20 +412,22 @@ FINDING #N: REJECTED — короткая причина
 Нумерация с 1. Без других пояснений. Будь строгим — лучше отбросить настоящее, чем оставить ложное."""
 
 
-def verify_findings(findings: list[Finding]) -> list[Finding]:
-    """Запускает верификатора, помечает каждую находку confirmed=True/False."""
+def verify_findings(agent_key: str, findings: list[Finding]) -> list[Finding]:
+    """Запускает верификатора, помечает каждую находку confirmed=True/False.
+    Шлёт только релевантный код (тот же что у анализатора), чтобы укладываться в лимит."""
     if not findings:
         return findings
     client = make_client()
     findings_block = "\n\n".join(
         f"FINDING #{i+1}:\n{f.raw}" for i, f in enumerate(findings)
     )
-    system = _build_cached_system(VERIFIER_INSTRUCTIONS)
+    code = build_code_for_agent(agent_key)
+    system = f"{VERIFIER_INSTRUCTIONS}\n\nКонтекст бота: {BOT_CONTEXT}"
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=2000,
         system=system,
-        messages=[{"role": "user", "content": f"Проверь эти находки:\n\n{findings_block}"}],
+        messages=[{"role": "user", "content": f"Код:\n\n{code}\n\n---\n\nПроверь эти находки:\n\n{findings_block}"}],
     )
     text = _extract_text(response)
 
@@ -406,28 +487,22 @@ def push_findings_to_issues(agent_key: str, findings: list[Finding]) -> int:
     return created
 
 
-# ── Competitor агент (отдельный, с web search) ───────────────────────────────
+# ── Competitor агент (без web search — на знаниях Claude + env list) ─────────
 
-COMPETITOR_PROMPT = """Ты — продуктовый аналитик Telegram-ботов. Используй web search чтобы:
+COMPETITORS_LIST = os.environ.get("COMPETITORS_LIST", "")  # формат: "name1: descr | name2: descr"
 
-1. Найти топ-10 Telegram-ботов для генерации изображений и видео (русский и англоязычный рынок).
-   Поисковые запросы: "топ telegram bot AI генерация изображений 2026", "best telegram AI image bot",
-   "Midjourney telegram alternative", "telegram бот нейросеть рисует".
+COMPETITOR_PROMPT = """Ты — продуктовый аналитик Telegram-ботов. Используй свои знания о рынке Telegram AI-ботов (Midjourney bots, Kandinsky, Shedevrum, DALLE bots, видео-боты Runway/Pika и т.д.).
 
-2. Для каждого конкурента собери:
-   - Название и @username (если есть)
-   - Ключевые фичи
-   - Модель монетизации (подписка/токены/разово)
-   - Цены
-   - Сильные UX-фишки (что цепляет пользователя)
+1. Перечисли топ-10 известных тебе Telegram-ботов для генерации изображений и видео.
+   Для каждого — название, @username (если знаешь), фичи, модель монетизации, цены, UX-фишки.
 
-3. Сравни с Сырником (наш бот):
+2. Сравни с Сырником (наш бот):
    - Валюта: изюминки (purchaseable + бесплатные)
    - Провайдеры: Zveno/Gemini, MashaGPT, YesAPI, Seedance видео
    - Реферальная система
    - Что есть у конкурентов и нет у нас?
 
-4. Выдай 5–10 КОНКРЕТНЫХ улучшений для Сырника в формате:
+3. Выдай 5–10 КОНКРЕТНЫХ улучшений для Сырника в формате:
 
 ## 🎯 [Категория] Название улучшения
 
@@ -441,18 +516,21 @@ COMPETITOR_PROMPT = """Ты — продуктовый аналитик Telegram
 
 ---
 
+Если знаешь, что какие-то конкретные боты сейчас лидируют — назови их. Не выдумывай несуществующих ботов.
+
 Отвечай на русском. Будь конкретным, без воды."""
 
 
 def call_competitor_agent() -> str:
     client = make_client()
-    system = _build_cached_system(COMPETITOR_PROMPT)
+    user_msg = "Сделай конкурентный анализ."
+    if COMPETITORS_LIST:
+        user_msg += f"\n\nОсобое внимание этим конкурентам: {COMPETITORS_LIST}"
     response = client.messages.create(
         model=CLAUDE_MODEL,
         max_tokens=8000,
-        system=system,
-        messages=[{"role": "user", "content": "Начинай исследование. Используй web search активно."}],
-        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 10}],
+        system=COMPETITOR_PROMPT,
+        messages=[{"role": "user", "content": user_msg}],
     )
     return _extract_text(response)
 
@@ -470,7 +548,7 @@ def run_agent_with_verification(agent_key: str) -> str:
         return f"## {cfg['role']}\n\n{raw}\n\n_Структурированных находок не найдено._"
 
     logger.info("[%s] найдено %d, верифицирую...", agent_key, len(findings))
-    findings = verify_findings(findings)
+    findings = verify_findings(agent_key, findings)
     confirmed = [f for f in findings if f.confirmed]
     rejected = [f for f in findings if not f.confirmed]
     logger.info("[%s] подтверждено %d, отклонено %d", agent_key, len(confirmed), len(rejected))
