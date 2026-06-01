@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 AGENT_BOT_TOKEN    = os.environ["AGENT_BOT_TOKEN"]
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
-CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL", "claude-3-5-haiku-20241022")
+CLAUDE_MODEL       = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5")
 GITHUB_REPO        = os.environ.get("SIRNIKE_REPO", os.environ.get("GITHUB_REPO", "gorbdan/sirnike"))
 GITHUB_TOKEN       = os.environ.get("GITHUB_TOKEN", "")
 ADMIN_IDS_RAW      = os.environ.get("ADMIN_IDS", "")
