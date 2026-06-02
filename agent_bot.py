@@ -37,7 +37,7 @@ ADMIN_IDS_RAW      = os.environ.get("ADMIN_IDS", "")
 ADMIN_IDS          = [int(x) for x in ADMIN_IDS_RAW.split(",") if x.strip()] if ADMIN_IDS_RAW else []
 AUTO_QA_INTERVAL_H = int(os.environ.get("AUTO_QA_INTERVAL_H", "0"))
 
-GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.md"]
+GITHUB_FILES = ["SirNike.py", "config.py", "db.py", "requirements.txt", "AGENT_NOTES.txt"]
 
 logger.info("Repo: %r | Model: %s | Issues: %s",
             GITHUB_REPO, CLAUDE_MODEL, "ON" if GITHUB_TOKEN else "OFF (no token)")
@@ -189,7 +189,7 @@ AGENTS_CONFIG = {
         "focus": "необработанные исключения, потери изюминок при крашах, проблемы очереди генерации, утечки памяти",
         "keywords": ["async def", "try:", "except", "asyncio", "Queue", "create_task",
                      "gather", "wait_for", "raise", "TimeoutError", "CancelledError"],
-        "files": ["SirNike.py", "requirements.txt", "AGENT_NOTES.md"],
+        "files": ["SirNike.py", "requirements.txt", "AGENT_NOTES.txt"],
     },
     "ux": {
         "role": "UX-аналитик Telegram-ботов с фокусом на новичков",
@@ -209,35 +209,35 @@ AGENTS_CONFIG = {
                      "приветств", "ошибк", "извин", "помощ", "непонятн", "попробуй",
                      "кнопк", "меню", "назад", "отмен", "изюминк", "баланс", "бесплатн",
                      "инструкц", "подсказ", "пример", "как ", "что ", "объясн"],
-        "files": ["SirNike.py", "AGENT_NOTES.md"],
+        "files": ["SirNike.py", "AGENT_NOTES.txt"],
     },
     "security": {
         "role": "Security-аналитик платёжных систем",
         "focus": "валидация платёжных payload, SQL-запросы, защита от накрутки, безопасность API",
         "keywords": ["pre_checkout", "successful_payment", "execute", "INSERT", "UPDATE",
                      "DELETE", "SELECT", "payload", "invoice", "token", "secret", "validate"],
-        "files": ["SirNike.py", "config.py", "AGENT_NOTES.md"],
+        "files": ["SirNike.py", "config.py", "AGENT_NOTES.txt"],
     },
     "marketing": {
         "role": "Growth-менеджер Telegram-ботов",
         "focus": "реферальная система, пакеты изюминок, бесплатные генерации, конверсия в покупку, retention",
         "keywords": ["referral", "referrer", "ref_", "izyuminki", "изюм", "bonus", "free",
                      "package", "пакет", "промо", "promo", "discount", "skidka"],
-        "files": ["SirNike.py", "AGENT_NOTES.md"],
+        "files": ["SirNike.py", "AGENT_NOTES.txt"],
     },
     "database": {
         "role": "Database-инженер SQLite",
         "focus": "транзакции, INSERT OR IGNORE, потеря данных при сбоях, схема БД, дублирование",
         "keywords": ["execute", "executemany", "commit", "rollback", "BEGIN", "INSERT",
                      "UPDATE", "DELETE", "SELECT", "CREATE TABLE", "sqlite", "cursor", "fetchone"],
-        "files": ["db.py", "SirNike.py", "AGENT_NOTES.md"],
+        "files": ["db.py", "SirNike.py", "AGENT_NOTES.txt"],
     },
     "performance": {
         "role": "Performance-инженер Python",
         "focus": "очередь генерации, кэш изображений, медленные DB-запросы, блокирующий I/O в async-контексте",
         "keywords": ["queue", "cache", "sleep", "wait", "lock", "executor", "run_in_executor",
                      "open(", "read(", "write(", "requests.", "urllib", "blocking"],
-        "files": ["SirNike.py", "AGENT_NOTES.md"],
+        "files": ["SirNike.py", "AGENT_NOTES.txt"],
     },
 }
 
@@ -725,28 +725,28 @@ async def run_agent_command(update: Update, runner_fn, filename: str, label: str
 
 
 async def cmd_audit(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, run_full_audit, "full_audit.md", "🔍 Полный аудит (6 агентов + верификация + issues)")
+    await run_agent_command(update, run_full_audit, "full_audit.txt", "🔍 Полный аудит (6 агентов + верификация + issues)")
 
 async def cmd_tech(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: run_agent_with_verification("tech"), "tech_report.md", "⚙️ Tech")
+    await run_agent_command(update, lambda: run_agent_with_verification("tech"), "tech_report.txt", "⚙️ Tech")
 
 async def cmd_ux(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: run_agent_with_verification("ux"), "ux_report.md", "👤 UX")
+    await run_agent_command(update, lambda: run_agent_with_verification("ux"), "ux_report.txt", "👤 UX")
 
 async def cmd_security(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: run_agent_with_verification("security"), "security_report.md", "🔒 Security")
+    await run_agent_command(update, lambda: run_agent_with_verification("security"), "security_report.txt", "🔒 Security")
 
 async def cmd_marketing(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: run_agent_with_verification("marketing"), "marketing_report.md", "📊 Marketing")
+    await run_agent_command(update, lambda: run_agent_with_verification("marketing"), "marketing_report.txt", "📊 Marketing")
 
 async def cmd_database(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: run_agent_with_verification("database"), "database_report.md", "🗄️ Database")
+    await run_agent_command(update, lambda: run_agent_with_verification("database"), "database_report.txt", "🗄️ Database")
 
 async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, lambda: run_agent_with_verification("performance"), "performance_report.md", "⚡ Performance")
+    await run_agent_command(update, lambda: run_agent_with_verification("performance"), "performance_report.txt", "⚡ Performance")
 
 async def cmd_competitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await run_agent_command(update, call_competitor_agent, "competitor_report.md", "🎯 Competitor research (web search)")
+    await run_agent_command(update, call_competitor_agent, "competitor_report.txt", "🎯 Competitor research (web search)")
 
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -827,7 +827,7 @@ async def auto_audit_loop(app):
         await asyncio.sleep(interval)
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, run_full_audit)
-            doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_audit.md")
+            doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_audit.txt")
             await app.bot.send_document(
                 chat_id=ADMIN_IDS[0],
                 document=doc,
