@@ -7,6 +7,7 @@
 """
 
 import asyncio
+import base64
 import io
 import json
 import logging
@@ -14,6 +15,7 @@ import os
 import re
 import urllib.request
 import urllib.error
+from datetime import datetime
 from dataclasses import dataclass, field
 
 import anthropic
@@ -122,6 +124,26 @@ def _normalize_title(s: str) -> str:
     """Нормализация для дедупа: lowercase, убираем спецсимволы и эмодзи."""
     s = re.sub(r"[^\w\s]", "", s.lower())
     return re.sub(r"\s+", " ", s).strip()
+
+
+def push_audit_to_github(content: str, filename: str) -> str | None:
+    """Сохраняет аудит как файл в audits/ репозитория sirnike. Возвращает URL или None."""
+    if not GITHUB_TOKEN:
+        return None
+    path = f"/repos/{GITHUB_REPO}/contents/audits/{filename}"
+    # Проверяем существующий файл (нужен sha для обновления)
+    existing = _gh_request("GET", path)
+    sha = existing.get("sha") if isinstance(existing, dict) else None
+    body = {
+        "message": f"audit: {filename}",
+        "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+    }
+    if sha:
+        body["sha"] = sha
+    result = _gh_request("PUT", path, body)
+    if result and isinstance(result, dict):
+        return result.get("content", {}).get("html_url")
+    return None
 
 
 def fetch_open_audit_issues() -> list[dict]:
@@ -610,6 +632,14 @@ async def run_agent_command(update: Update, runner_fn, filename: str, label: str
             pass
         doc = InputFile(io.BytesIO(result.encode("utf-8-sig")), filename=filename)
         await update.message.reply_document(document=doc)
+        # Сохраняем в GitHub
+        ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+        gh_filename = f"{ts}_{filename}"
+        url = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: push_audit_to_github(result, gh_filename)
+        )
+        if url:
+            await update.message.reply_text(f"📁 Сохранено в GitHub: {url}")
     except Exception as e:
         logger.exception("Agent failed")
         await msg.edit_text(f"❌ Ошибка: {e}")
