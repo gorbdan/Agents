@@ -8,6 +8,7 @@
 
 import asyncio
 import base64
+import time
 import io
 import json
 import logging
@@ -600,14 +601,21 @@ def run_agent_with_verification(agent_key: str) -> str:
     return "\n\n".join(parts)
 
 
+AUDIT_PAUSE_SECONDS = 65  # пауза между агентами чтобы не превысить rate limit
+
+
 def run_full_audit() -> str:
     results = []
-    for key in AGENTS_CONFIG:
+    keys = list(AGENTS_CONFIG.keys())
+    for i, key in enumerate(keys):
         try:
             results.append(run_agent_with_verification(key))
         except Exception as e:
             logger.exception("Agent %s failed", key)
             results.append(f"## {AGENTS_CONFIG[key]['role']}\n\n❌ Ошибка: {e}")
+        if i < len(keys) - 1:
+            logger.info("Пауза %ds перед следующим агентом...", AUDIT_PAUSE_SECONDS)
+            time.sleep(AUDIT_PAUSE_SECONDS)
     return "# Полный аудит Сырника\n\n" + "\n\n---\n\n".join(results)
 
 
