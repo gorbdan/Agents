@@ -629,6 +629,12 @@ def run_agent_with_verification(agent_key: str) -> str:
     """Анализатор → парсер → верификатор → issues → итоговый markdown."""
     cfg = AGENTS_CONFIG[agent_key]
     logger.info("[%s] анализирую...", agent_key)
+
+    # UX-агент не верифицируется — его находки про тексты и интерфейс, не про код
+    if agent_key == "ux":
+        raw = call_agent(agent_key)
+        return f"## {cfg['role']}\n\n{raw}"
+
     raw = call_agent(agent_key)
 
     findings = parse_findings(raw)
