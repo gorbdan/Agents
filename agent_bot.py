@@ -608,7 +608,7 @@ async def run_agent_command(update: Update, runner_fn, filename: str, label: str
             await msg.delete()
         except Exception:
             pass
-        doc = InputFile(io.BytesIO(result.encode("utf-8")), filename=filename)
+        doc = InputFile(io.BytesIO(result.encode("utf-8-sig")), filename=filename)
         await update.message.reply_document(document=doc)
     except Exception as e:
         logger.exception("Agent failed")
