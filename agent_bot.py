@@ -827,12 +827,19 @@ async def auto_audit_loop(app):
         await asyncio.sleep(interval)
         try:
             result = await asyncio.get_event_loop().run_in_executor(None, run_full_audit)
-            doc = InputFile(io.BytesIO(result.encode("utf-8")), filename="auto_audit.txt")
+            ts = datetime.utcnow().strftime("%Y-%m-%d_%H-%M")
+            gh_filename = f"{ts}_auto_audit.txt"
+            doc = InputFile(io.BytesIO(result.encode("utf-8-sig")), filename="auto_audit.txt")
             await app.bot.send_document(
                 chat_id=ADMIN_IDS[0],
                 document=doc,
                 caption=f"🤖 Авто-аудит (каждые {AUTO_QA_INTERVAL_H}ч)",
             )
+            url = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: push_audit_to_github(result, gh_filename)
+            )
+            if url:
+                await app.bot.send_message(chat_id=ADMIN_IDS[0], text=f"📁 Сохранено в GitHub: {url}")
         except Exception:
             logger.exception("Auto-audit failed")
 
