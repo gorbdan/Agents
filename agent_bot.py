@@ -675,6 +675,90 @@ def run_agent_with_verification(agent_key: str) -> str:
 AUDIT_PAUSE_SECONDS = 65  # пауза между агентами чтобы не превысить rate limit
 
 
+# ── /fix: фиксер багов по файлу аудита ───────────────────────────────────────
+
+FIX_SYSTEM_PROMPT = f"""{BOT_CONTEXT}
+
+Ты — хирург кода. Получаешь файл аудита с найденными багами и код бота.
+Для каждой находки из аудита:
+1. Найди точную строку в коде.
+2. Напиши 1–2 предложения простыми словами — в чём суть бага и что случится с пользователем если не починить.
+3. Проверь: находка реальная или противоречит архитектуре? Если ложная — пропусти с объяснением.
+4. Примени минимальный фикс: меняй только сломанное место.
+
+После всех правок убедись, что поток выполнения и логика изменённых функций не нарушены.
+
+ЖЁСТКИЕ ПРАВИЛА:
+- Один баг = одно объяснение + один точечный фикс. Не трогай код вокруг.
+- Не добавляй новые функции, хелперы, абстракции.
+- Не добавляй обработку ошибок для ситуаций, невозможных в asyncio.
+- Не переименовывай переменные, не меняй стиль кода.
+- Не добавляй комментарии, если без них фикс и так понятен.
+- Если фикс одного бага затрагивает код другого — объедини изменения, не делай два конфликтующих патча.
+- Если не уверен в фиксе — напиши ВОПРОС, не угадывай.
+
+ФОРМАТ ПО КАЖДОЙ НАХОДКЕ:
+
+## [файл:строка] Название из аудита
+
+**Что происходит:** 1–2 предложения простым языком — суть бага и последствие для пользователя.
+
+**Было:**
+```python
+старый_код
+```
+
+**Стало:**
+```python
+новый_код
+```
+
+**Действие:** ✅ ПРИМЕНЕНО / ⏭️ ПРОПУЩЕНО (причина) / ⚠️ ВОПРОС (что непонятно)
+
+---
+
+В конце: **Итог:** X применено, Y пропущено, Z под вопросом."""
+
+
+def fetch_latest_audit_file() -> tuple[str, str] | tuple[None, None]:
+    """Загружает список файлов из audits/ и возвращает содержимое последнего по имени."""
+    result = _gh_request("GET", f"/repos/{GITHUB_REPO}/contents/audits")
+    if not isinstance(result, list):
+        return None, None
+    audit_files = [f for f in result if isinstance(f, dict) and f.get("type") == "file"]
+    if not audit_files:
+        return None, None
+    latest = sorted(audit_files, key=lambda f: f.get("name", ""))[-1]
+    name = latest.get("name", "audit.txt")
+    content = fetch_github_file(GITHUB_REPO, f"audits/{name}", GITHUB_TOKEN)
+    return name, content
+
+
+def run_fix_agent() -> str:
+    """Загружает последний аудит и код, запускает агента-фиксера."""
+    audit_name, audit_content = fetch_latest_audit_file()
+    if not audit_content:
+        return "❌ Не удалось загрузить файл аудита из audits/. Убедись что GITHUB_TOKEN задан и папка не пуста."
+
+    code_block = build_full_code_block(CODE_FILES)
+    client = make_client()
+    response = client.messages.create(
+        model=CLAUDE_MODEL,
+        max_tokens=8000,
+        system=FIX_SYSTEM_PROMPT,
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Файл аудита: {audit_name}\n\n"
+                f"=== АУДИТ ===\n{audit_content}\n\n"
+                f"=== КОД ===\n{code_block}"
+            ),
+        }],
+    )
+    result = _extract_text(response)
+    return f"# Фикс по аудиту: {audit_name}\n\n{result}"
+
+
 def run_full_audit() -> str:
     results = []
     keys = list(AGENTS_CONFIG.keys())
@@ -748,6 +832,9 @@ async def cmd_performance(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_competitor(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_agent_command(update, call_competitor_agent, "competitor_report.txt", "🎯 Competitor research (web search)")
 
+async def cmd_fix(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await run_agent_command(update, run_fix_agent, "fix_report.txt", "🔧 Фиксер багов по последнему аудиту")
+
 
 async def cmd_reload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update.effective_user.id):
@@ -808,6 +895,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/database — целостность данных\n"
         "/performance — производительность\n\n"
         "/competitor — глубокое исследование конкурентов\n\n"
+        "/fix — применить фиксы по последнему аудиту\n\n"
         "/reload — обновить код с GitHub\n"
         "/selftest — проверить что всё работает"
     )
@@ -865,6 +953,7 @@ def main():
     app.add_handler(CommandHandler("database", cmd_database))
     app.add_handler(CommandHandler("performance", cmd_performance))
     app.add_handler(CommandHandler("competitor", cmd_competitor))
+    app.add_handler(CommandHandler("fix", cmd_fix))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
 
