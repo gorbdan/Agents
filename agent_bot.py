@@ -887,15 +887,8 @@ async def cmd_selftest(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "Агенты Сырника 🧀\n\n"
-        "/audit — полный аудит (6 агентов + верификация + GitHub Issues)\n\n"
-        "/tech — технические баги\n"
-        "/ux — UX (с web search конкурентов)\n"
-        "/security — безопасность и платежи\n"
-        "/marketing — монетизация и рефералы\n"
-        "/database — целостность данных\n"
-        "/performance — производительность\n\n"
-        "/competitor — глубокое исследование конкурентов\n\n"
-        "/fix — применить фиксы по последнему аудиту\n\n"
+        "⚠️ Аудит-команды отключены — теперь аудиты гоняются локально через Claude Code "
+        "(по подписке, без затрат токенов ANTHROPIC_API_KEY).\n\n"
         "/reload — обновить код с GitHub\n"
         "/selftest — проверить что всё работает"
     )
@@ -907,6 +900,9 @@ _auto_audit_task = None
 
 
 async def auto_audit_loop(app):
+    # Отключено: аудиты теперь гоняются локально через Claude Code (по подписке),
+    # чтобы не тратить токены ANTHROPIC_API_KEY на сервере.
+    return
     if not AUTO_QA_INTERVAL_H or not ADMIN_IDS:
         return
     interval = AUTO_QA_INTERVAL_H * 3600
@@ -945,15 +941,17 @@ def main():
     app = Application.builder().token(AGENT_BOT_TOKEN).post_init(post_init).build()
     app.add_handler(CommandHandler("start", cmd_help))
     app.add_handler(CommandHandler("help", cmd_help))
-    app.add_handler(CommandHandler("audit", cmd_audit))
-    app.add_handler(CommandHandler("tech", cmd_tech))
-    app.add_handler(CommandHandler("ux", cmd_ux))
-    app.add_handler(CommandHandler("security", cmd_security))
-    app.add_handler(CommandHandler("marketing", cmd_marketing))
-    app.add_handler(CommandHandler("database", cmd_database))
-    app.add_handler(CommandHandler("performance", cmd_performance))
-    app.add_handler(CommandHandler("competitor", cmd_competitor))
-    app.add_handler(CommandHandler("fix", cmd_fix))
+    # Аудит-команды отключены: гоняем агентов локально через Claude Code (по подписке),
+    # чтобы не жечь токены ANTHROPIC_API_KEY на сервере.
+    # app.add_handler(CommandHandler("audit", cmd_audit))
+    # app.add_handler(CommandHandler("tech", cmd_tech))
+    # app.add_handler(CommandHandler("ux", cmd_ux))
+    # app.add_handler(CommandHandler("security", cmd_security))
+    # app.add_handler(CommandHandler("marketing", cmd_marketing))
+    # app.add_handler(CommandHandler("database", cmd_database))
+    # app.add_handler(CommandHandler("performance", cmd_performance))
+    # app.add_handler(CommandHandler("competitor", cmd_competitor))
+    # app.add_handler(CommandHandler("fix", cmd_fix))
     app.add_handler(CommandHandler("reload", cmd_reload))
     app.add_handler(CommandHandler("selftest", cmd_selftest))
 
